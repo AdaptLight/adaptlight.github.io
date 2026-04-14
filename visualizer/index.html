@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AdaptLight Visualizer</title>
+  <meta name="color-scheme" content="light dark">
+  <style>
+    html { background: #0c0c0e; color-scheme: dark; }
+    html[data-theme="light"] { background: #f5f5f5; color-scheme: light; }
+    html[data-theme="dark"] { background: #0c0c0e; color-scheme: dark; }
+    @media (prefers-color-scheme: light) {
+      html:not([data-theme="dark"]) { background: #f5f5f5; color-scheme: light; }
+    }
+  </style>
+  <script>
+    (function() {
+      var saved = localStorage.getItem("theme");
+      if (saved) document.documentElement.setAttribute("data-theme", saved);
+    })();
+  </script>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-title">
+        <img src="icon.png" alt="" width="20" height="20">
+        <h1>AdaptLight</h1>
+      </div>
+      <div class="header-buttons">
+        <button id="themeToggle" type="button" title="Toggle light/dark mode">
+          <svg id="themeIconSun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg id="themeIconMoon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <button id="sidebarHide" type="button" title="Hide sidebar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><polyline points="15 8 12 12 15 16"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <section class="control-group">
+      <h2>Curve Shape</h2>
+      <div class="toggle-row">
+        <label for="curveType">Interpolation</label>
+        <select id="curveType">
+          <option value="linear">Linear</option>
+          <option value="tanh" selected>Tanh (S-curve)</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="control-group">
+      <h2>Brightness</h2>
+      <div class="slider-row">
+        <label>Min</label>
+        <input type="range" id="minBrightness" min="0" max="100" value="10">
+        <input type="number" class="num-input" id="minBrightnessNum" min="0" max="100" value="10">
+      </div>
+      <div class="slider-row">
+        <label>Max</label>
+        <input type="range" id="maxBrightness" min="0" max="100" value="100">
+        <input type="number" class="num-input" id="maxBrightnessNum" min="0" max="100" value="100">
+      </div>
+    </section>
+
+    <section class="control-group">
+      <h2>Timing</h2>
+      <div class="time-row">
+        <label for="wakeStart">Wake start</label>
+        <input type="time" id="wakeStart" value="06:00">
+      </div>
+      <div class="time-row">
+        <label for="wakeEnd">Wake end</label>
+        <input type="time" id="wakeEnd" value="08:00">
+      </div>
+      <div class="time-row">
+        <label for="dozeStart">Doze start</label>
+        <input type="time" id="dozeStart" value="20:00">
+      </div>
+      <div class="time-row">
+        <label for="dozeEnd">Doze end</label>
+        <input type="time" id="dozeEnd" value="22:00">
+      </div>
+
+      <div class="section-divider"></div>
+
+      <div class="toggle-row">
+        <label for="syncCurves">Sync color timing</label>
+        <input type="checkbox" id="syncCurves" checked>
+      </div>
+      <div id="colorTimingSection" style="display:none;">
+        <div class="time-row">
+          <label for="colorWakeStart">Color wake start</label>
+          <input type="time" id="colorWakeStart" value="05:30">
+        </div>
+        <div class="time-row">
+          <label for="colorWakeEnd">Color wake end</label>
+          <input type="time" id="colorWakeEnd" value="09:00">
+        </div>
+        <div class="time-row">
+          <label for="colorDozeStart">Color doze start</label>
+          <input type="time" id="colorDozeStart" value="19:00">
+        </div>
+        <div class="time-row">
+          <label for="colorDozeEnd">Color doze end</label>
+          <input type="time" id="colorDozeEnd" value="23:00">
+        </div>
+      </div>
+    </section>
+
+    <section class="control-group">
+      <h2>Color</h2>
+      <div class="slider-row">
+        <label>Temp min</label>
+        <input type="range" id="minColorTemp" min="1000" max="10000" step="100" value="2200">
+        <input type="number" class="num-input" id="minColorTempNum" min="1000" max="10000" step="100" value="2200">
+      </div>
+      <div class="slider-row">
+        <label>Temp max</label>
+        <input type="range" id="maxColorTemp" min="1000" max="10000" step="100" value="5500">
+        <input type="number" class="num-input" id="maxColorTempNum" min="1000" max="10000" step="100" value="5500">
+      </div>
+
+      <div class="section-divider"></div>
+
+      <div class="toggle-row">
+        <label for="useRgbColor">Use RGB instead</label>
+        <input type="checkbox" id="useRgbColor">
+      </div>
+      <div id="rgbControls" style="display:none;">
+        <div class="color-row">
+          <label for="rgbStartColor">Start color</label>
+          <input type="color" id="rgbStartColor" value="#ff8800">
+        </div>
+        <div class="color-row">
+          <label for="rgbEndColor">End color</label>
+          <input type="color" id="rgbEndColor" value="#3388ff">
+        </div>
+      </div>
+    </section>
+
+    <section class="control-group">
+      <h2>Sun Shift</h2>
+      <div class="toggle-row">
+        <label for="sunShiftEnabled">Enable</label>
+        <input type="checkbox" id="sunShiftEnabled">
+      </div>
+      <div id="sunShiftControls" style="display:none;">
+        <div class="slider-row">
+          <label>Strength</label>
+          <input type="range" id="sunShiftStrength" min="0" max="30" step="1" value="10">
+          <input type="number" class="num-input" id="sunShiftStrengthNum" min="0" max="30" step="1" value="10">
+        </div>
+        <div class="time-row">
+          <label for="sunrise">Sunrise</label>
+          <input type="time" id="sunrise" value="06:30">
+        </div>
+        <div class="time-row">
+          <label for="sunset">Sunset</label>
+          <input type="time" id="sunset" value="19:30">
+        </div>
+      </div>
+    </section>
+
+    <section class="control-group">
+      <h2>Lux Sensor</h2>
+      <div class="toggle-row">
+        <label for="luxEnabled">Enable</label>
+        <input type="checkbox" id="luxEnabled">
+      </div>
+      <div id="luxControls" style="display:none;">
+        <div class="slider-row">
+          <label>Strength</label>
+          <input type="range" id="luxStrength" min="0" max="20" step="1" value="10">
+          <input type="number" class="num-input" id="luxStrengthNum" min="0" max="20" step="1" value="10">
+        </div>
+        <div class="slider-row">
+          <label>Current lux</label>
+          <input type="range" id="currentLux" min="0" max="90000" step="100" value="5000">
+          <input type="number" class="num-input" id="currentLuxNum" min="0" max="90000" step="100" value="5000">
+        </div>
+        <div class="slider-row">
+          <label>Max lux</label>
+          <input type="range" id="effectiveMax" min="1" max="100000" step="100" value="10000">
+          <input type="number" class="num-input" id="effectiveMaxNum" min="1" max="100000" step="100" value="10000">
+        </div>
+      </div>
+    </section>
+
+  </aside>
+
+  <div id="resize-handle"></div>
+
+  <main id="chart-area">
+    <button id="sidebarShow" type="button" title="Show sidebar">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><polyline points="12 8 15 12 12 16"/></svg>
+    </button>
+    <canvas id="curveChart"></canvas>
+  </main>
+
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
