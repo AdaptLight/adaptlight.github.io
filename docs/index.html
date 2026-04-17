@@ -5,22 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AdaptLight Visualizer</title>
   <meta name="color-scheme" content="light dark">
-  <style>
-    html { background: #0c0c0e; color-scheme: dark; }
-    html[data-theme="light"] { background: #f5f5f5; color-scheme: light; }
-    html[data-theme="dark"] { background: #0c0c0e; color-scheme: dark; }
-    @media (prefers-color-scheme: light) {
-      html:not([data-theme="dark"]) { background: #f5f5f5; color-scheme: light; }
-    }
-  </style>
   <script>
-    (function() {
+    (() => {
       var saved = localStorage.getItem("theme");
-      if (saved) document.documentElement.setAttribute("data-theme", saved);
+      var theme = saved || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      var root = document.documentElement;
+      var meta = document.querySelector('meta[name="color-scheme"]');
+      var scheme = theme === "light" ? "only light" : "dark light";
+      root.setAttribute("data-theme", theme);
+      if (meta) meta.content = scheme;
+      root.style.colorScheme = scheme;
+      root.style.backgroundColor = theme === "light" ? "#f5f5f5" : "#0c0c0e";
     })();
   </script>
+  <style>
+    html { background: #0c0c0e; color-scheme: dark light; }
+    html[data-theme="light"] { background: #f5f5f5; color-scheme: only light; }
+    html[data-theme="dark"] { background: #0c0c0e; color-scheme: dark light; }
+    @media (prefers-color-scheme: light) {
+      html:not([data-theme="dark"]) { background: #f5f5f5; color-scheme: only light; }
+    }
+  </style>
   <link rel="stylesheet" href="resources/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -32,22 +38,25 @@
       </div>
       <div class="header-buttons">
         <button id="themeToggle" type="button" title="Toggle light/dark mode">
-          <svg id="themeIconSun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-          <svg id="themeIconMoon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg id="themeIconSun" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg id="themeIconMoon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         </button>
         <button id="sidebarHide" type="button" title="Hide sidebar">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><polyline points="15 8 12 12 15 16"/></svg>
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><polyline points="15 8 12 12 15 16"/></svg>
         </button>
       </div>
     </div>
 
     <section class="control-group">
-      <h2>Curve Shape</h2>
+      <h2>Curve Type</h2>
       <div class="toggle-row">
-        <label for="curveType">Interpolation</label>
+        <label for="curveType">Ramp Shape</label>
         <select id="curveType">
-          <option value="linear">Linear</option>
-          <option value="tanh" selected>Tanh (S-curve)</option>
+          <option value="linear" selected>Linear</option>
+          <option value="smooth">Smooth</option>
+          <option value="steep">Steep</option>
+          <option value="ease_in">Ease In</option>
+          <option value="ease_out">Ease Out</option>
         </select>
       </div>
     </section>
@@ -88,8 +97,8 @@
       <div class="section-divider"></div>
 
       <div class="toggle-row">
-        <label for="syncCurves">Sync color timing</label>
         <input type="checkbox" id="syncCurves" checked>
+        <label for="syncCurves">Sync color timing</label>
       </div>
       <div id="colorTimingSection" style="display:none;">
         <div class="time-row">
@@ -127,17 +136,19 @@
       <div class="section-divider"></div>
 
       <div class="toggle-row">
-        <label for="useRgbColor">Use RGB instead</label>
         <input type="checkbox" id="useRgbColor">
+        <label for="useRgbColor">Use RGB instead</label>
       </div>
       <div id="rgbControls" style="display:none;">
         <div class="color-row">
           <label for="rgbStartColor">Start color</label>
           <input type="color" id="rgbStartColor" value="#ff8800">
+          <button id="rgbStartColorReset" type="button" class="color-reset-btn" title="Reset start color">Reset</button>
         </div>
         <div class="color-row">
           <label for="rgbEndColor">End color</label>
           <input type="color" id="rgbEndColor" value="#3388ff">
+          <button id="rgbEndColorReset" type="button" class="color-reset-btn" title="Reset end color">Reset</button>
         </div>
       </div>
     </section>
@@ -145,8 +156,8 @@
     <section class="control-group">
       <h2>Sun Shift</h2>
       <div class="toggle-row">
-        <label for="sunShiftEnabled">Enable</label>
         <input type="checkbox" id="sunShiftEnabled">
+        <label for="sunShiftEnabled">Enable</label>
       </div>
       <div id="sunShiftControls" style="display:none;">
         <div class="slider-row">
@@ -168,8 +179,8 @@
     <section class="control-group">
       <h2>Lux Sensor</h2>
       <div class="toggle-row">
-        <label for="luxEnabled">Enable</label>
         <input type="checkbox" id="luxEnabled">
+        <label for="luxEnabled">Enable</label>
       </div>
       <div id="luxControls" style="display:none;">
         <div class="slider-row">
@@ -196,11 +207,14 @@
 
   <main id="chart-area">
     <button id="sidebarShow" type="button" title="Show sidebar">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><polyline points="12 8 15 12 12 16"/></svg>
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><polyline points="12 8 15 12 12 16"/></svg>
     </button>
-    <canvas id="curveChart"></canvas>
+    <div id="chartCanvasShell">
+      <canvas id="curveChart"></canvas>
+    </div>
   </main>
 
+  <script src="resources/chart-lite.js"></script>
   <script src="resources/engine.js"></script>
   <script src="resources/app.js"></script>
 </body>
