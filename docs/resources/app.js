@@ -41,7 +41,6 @@
     const s = getComputedStyle(document.documentElement);
     return {
       tick: s.getPropertyValue("--chart-tick").trim(),
-      grid: s.getPropertyValue("--chart-grid").trim(),
       line: s.getPropertyValue("--chart-line").trim(),
       fill: s.getPropertyValue("--chart-fill").trim(),
       text: s.getPropertyValue("--text").trim(),
@@ -136,6 +135,7 @@
           }
         }
         n.value = fmt.toDisplay(+s.value);
+        s.dispatchEvent(new Event("input", { bubbles: true }));
       });
     } else {
       s.addEventListener("input", syncNumberFromSlider);
@@ -159,6 +159,7 @@
           }
         }
         n.value = String(s.value);
+        s.dispatchEvent(new Event("input", { bubbles: true }));
       });
     }
   });
@@ -184,6 +185,8 @@
     sunShiftEnabled: $("sunShiftEnabled"),
     sunShiftControls: $("sunShiftControls"),
     sunShiftStrength: $("sunShiftStrength"),
+    useLocation: $("useLocation"),
+    locationStatus: $("locationStatus"),
     sunrise: $("sunrise"),
     sunset: $("sunset"),
     luxEnabled: $("luxEnabled"),
@@ -272,11 +275,97 @@
     };
   }
 
+  // ── Location-based sun times ──
+
+  let geoLocation = null;
+  let geoLabel = "";
+
+  function saveLocation() {
+    if (geoLocation && geoLabel) {
+      localStorage.setItem("geoLocation", JSON.stringify({ lat: geoLocation.lat, lon: geoLocation.lon, label: geoLabel }));
+    }
+    localStorage.setItem("useLocation", els.useLocation.checked ? "1" : "");
+  }
+
+  function setLocationStatus(text) {
+    els.locationStatus.textContent = text;
+  }
+
+  function applySunTimes() {
+    if (!geoLocation) return;
+    const times = SunCalc.calculate(geoLocation.lat, geoLocation.lon, new Date());
+    if (!times) { setLocationStatus("Sun times unavailable for this latitude"); return; }
+    els.sunrise.value = times.sunrise;
+    els.sunrise.dataset.lastValidValue = times.sunrise;
+    els.sunset.value = times.sunset;
+    els.sunset.dataset.lastValidValue = times.sunset;
+    render();
+  }
+
+  function fetchLocation() {
+    setLocationStatus("Locating...");
+    fetch("https://ipinfo.io/json")
+      .then(r => r.json())
+      .then(data => {
+        const loc = data.loc ? data.loc.split(",") : null;
+        if (loc && loc.length === 2) {
+          geoLocation = { lat: +loc[0], lon: +loc[1] };
+          geoLabel = data.city ? data.city + ", " + (data.country || data.region) : "Location found";
+          setLocationStatus(geoLabel);
+          saveLocation();
+          applySunTimes();
+        } else {
+          setLocationStatus("Could not determine location");
+        }
+      })
+      .catch(() => { setLocationStatus("Location lookup failed"); });
+  }
+
+  (function restoreLocation() {
+    const saved = localStorage.getItem("geoLocation");
+    const wasOn = localStorage.getItem("useLocation") === "1";
+    if (saved && wasOn) {
+      try {
+        const d = JSON.parse(saved);
+        geoLocation = { lat: d.lat, lon: d.lon };
+        geoLabel = d.label || "Location found";
+        els.useLocation.checked = true;
+        setLocationStatus(geoLabel);
+        applySunTimes();
+      } catch (_) { /* corrupt data, ignore */ }
+    }
+  })();
+
+  els.useLocation.addEventListener("change", () => {
+    if (els.useLocation.checked) {
+      if (geoLocation) {
+        setLocationStatus(geoLabel);
+        applySunTimes();
+      } else {
+        fetchLocation();
+      }
+    } else {
+      setLocationStatus("");
+    }
+    saveLocation();
+    updateSunInputState();
+    render();
+  });
+
+  function updateSunInputState() {
+    var locked = els.useLocation.checked;
+    els.sunrise.readOnly = locked;
+    els.sunset.readOnly = locked;
+    els.sunrise.style.opacity = locked ? "0.6" : "";
+    els.sunset.style.opacity = locked ? "0.6" : "";
+  }
+
   function updateVisibility() {
     els.colorTimingSection.style.display = els.syncCurves.checked ? "none" : "";
     els.sunShiftControls.style.display = els.sunShiftEnabled.checked ? "" : "none";
     els.luxControls.style.display = els.luxEnabled.checked ? "" : "none";
     els.rgbControls.style.display = els.useRgbColor.checked ? "" : "none";
+    updateSunInputState();
   }
 
   // ── Resizable sidebar ──
@@ -410,6 +499,24 @@
     },
   };
 
+  // ── Overlay toggle (grid + now line) ──
+
+  let overlayVisible = true;
+  const overlayToggle = $("overlayToggle");
+  const overlayIconShow = $("overlayIconShow");
+  const overlayIconHide = $("overlayIconHide");
+  overlayIconHide.style.display = "none";
+
+  overlayToggle.addEventListener("click", () => {
+    overlayVisible = !overlayVisible;
+    overlayIconShow.style.display = overlayVisible ? "block" : "none";
+    overlayIconHide.style.display = overlayVisible ? "none" : "block";
+    if (typeof chart !== "undefined") {
+      chart.overlayVisible = overlayVisible;
+      chart.update();
+    }
+  });
+
   // ── Now-line plugin ──
 
   let nowLineColors = null;
@@ -417,6 +524,7 @@
   const nowLinePlugin = {
     id: "nowLine",
     afterDraw(ch) {
+      if (!overlayVisible) return;
       const now = new Date();
       const minuteOfDay = now.getHours() * 60 + now.getMinutes();
       const xScale = ch.scales.x;
@@ -483,7 +591,7 @@
             color: initColors.tick,
             font: { size: scale(12), family: getUiFontFamily() },
           },
-          grid: { color: initColors.grid },
+          grid: {},
         },
         yBrightness: {
           title: {
@@ -496,13 +604,13 @@
             color: initColors.tick,
             font: { size: scale(12), family: getUiFontFamily() },
           },
-          grid: {
-            color: initColors.grid,
-          },
+          grid: {},
         },
       },
     },
   });
+
+  chart.overlayVisible = overlayVisible;
 
   $("themeToggle").addEventListener("click", () => {
     const current = getEffectiveTheme();
@@ -540,10 +648,8 @@
     chart.data.datasets[0].borderColor = c.line;
     chart.data.datasets[0].backgroundColor = c.fill;
     chart.options.scales.x.ticks.color = c.tick;
-    chart.options.scales.x.grid.color = c.grid;
     chart.options.scales.yBrightness.title.color = c.tick;
     chart.options.scales.yBrightness.ticks.color = c.tick;
-    chart.options.scales.yBrightness.grid.color = c.grid;
     chart.update();
   }
 
@@ -597,4 +703,7 @@
   });
 
   render();
+  requestAnimationFrame(() => {
+    $("chartCanvasShell").classList.add("chart-ready");
+  });
 })();

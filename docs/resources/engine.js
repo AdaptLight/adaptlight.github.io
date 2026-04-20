@@ -22,7 +22,7 @@ function inCircularRange(now, start, end) {
 function progress(now, start, end) {
   const elapsed = mod(now - start, DAY_S);
   const duration = mod(end - start, DAY_S);
-  if (duration === 0) return 0;
+  if (duration === 0) return 1;
   return clamp(elapsed / duration, 0, 1);
 }
 
@@ -142,7 +142,9 @@ function applyLux(curveBrightness, currentLux, effectiveMax, strength, minB, max
   if (effectiveMax <= 0) return curveBrightness;
   const luxRatio = clamp(currentLux / effectiveMax, 0, 1);
   const multiplier = 1 - strength + strength * luxRatio;
-  return clamp(curveBrightness * multiplier, minB, maxB);
+  const lo = Math.min(minB, maxB);
+  const hi = Math.max(minB, maxB);
+  return clamp(curveBrightness * multiplier, lo, hi);
 }
 
 function srgbToLinear(c) {

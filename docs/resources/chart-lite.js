@@ -61,16 +61,18 @@
     return Number.isFinite(value) && value > 0 ? value : 1;
   }
 
-  function getXAxisTickStepMinutes(chartWidth) {
-    if (chartWidth >= 1000) return 30;
-    if (chartWidth < 220) return 180;
-    if (chartWidth < 500) return 120;
+  function getXAxisTickStepMinutes(chartWidth, uiScale) {
+    const w = chartWidth / (uiScale || 1);
+    if (w >= 1000) return 30;
+    if (w < 220) return 180;
+    if (w < 500) return 120;
     return 60;
   }
 
-  function getBrightnessTickStep(chartHeight) {
-    if (chartHeight < 180) return 20;
-    if (chartHeight < 320) return 10;
+  function getBrightnessTickStep(chartHeight, uiScale) {
+    const h = chartHeight / (uiScale || 1);
+    if (h < 180) return 20;
+    if (h < 320) return 10;
     return 5;
   }
 
@@ -194,6 +196,7 @@
       this.canvas.style.height = `${cssHeight}px`;
 
       this.ctx.setTransform(this._dpr, 0, 0, this._dpr, 0, 0);
+      this._clearTrail();
       this._hideTooltip(false);
       this.draw();
     }
@@ -309,38 +312,83 @@
     }
 
     _drawGrid(layout) {
+      if (this.overlayVisible === false) return;
       const ctx = this.ctx;
       const chartArea = layout.chartArea;
-      const xGrid = (this.options.scales.x.grid && this.options.scales.x.grid.color) || "rgba(0,0,0,0.08)";
-      const yGrid = (this.options.scales.yBrightness.grid && this.options.scales.yBrightness.grid.color) || "rgba(0,0,0,0.08)";
       const labels = layout.labels;
-      const tickStepMinutes = getXAxisTickStepMinutes(chartArea.width);
       const uiScale = this._uiScale || getUiScale();
+      const tickStepMinutes = getXAxisTickStepMinutes(chartArea.width, uiScale);
       const xGridBottomExtend = Math.round(13 * uiScale);
       const yGridLeftExtend = Math.round(11 * uiScale);
-      const yStep = getBrightnessTickStep(chartArea.height);
+      const yStep = getBrightnessTickStep(chartArea.height, uiScale);
+      const lw = Math.max(1, uiScale);
 
-      ctx.save();
-      ctx.lineWidth = Math.max(1, uiScale);
-      ctx.strokeStyle = xGrid;
-
+      // Precompute grid positions
+      const xPositions = [];
       for (let minute = 0; minute <= 24 * 60; minute += tickStepMinutes) {
         const index = Math.min(labels.length - 1, minute);
-        const x = this.scales.x.getPixelForValue(index);
-        const crispX = Math.round(x) + 0.5;
+        xPositions.push(Math.round(this.scales.x.getPixelForValue(index)) + 0.5);
+      }
+      const yPositions = [];
+      for (let value = 0; value <= 100; value += yStep) {
+        yPositions.push(Math.round(chartArea.bottom - (value / 100) * chartArea.height) + 0.5);
+      }
+
+      // 1a. Gridlines inside chart area: invert against the gradient
+      ctx.save();
+      ctx.globalCompositeOperation = "difference";
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = "rgba(255,255,255,0.30)";
+      for (const crispX of xPositions) {
         ctx.beginPath();
         ctx.moveTo(crispX, chartArea.top);
+        ctx.lineTo(crispX, chartArea.bottom);
+        ctx.stroke();
+      }
+      for (const crispY of yPositions) {
+        ctx.beginPath();
+        ctx.moveTo(chartArea.left, crispY);
+        ctx.lineTo(chartArea.right, crispY);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 1b. Luminosity safety net for saturated blue/purple where difference fails.
+      // Pushes backdrop luminance toward ~70% gray, creating contrast through the green channel (highest perceptual weight, 10x blue sensitivity).
+      ctx.save();
+      ctx.globalCompositeOperation = "luminosity";
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = "rgba(179,179,179,0.30)";
+      for (const crispX of xPositions) {
+        ctx.beginPath();
+        ctx.moveTo(crispX, chartArea.top);
+        ctx.lineTo(crispX, chartArea.bottom);
+        ctx.stroke();
+      }
+      for (const crispY of yPositions) {
+        ctx.beginPath();
+        ctx.moveTo(chartArea.left, crispY);
+        ctx.lineTo(chartArea.right, crispY);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 2. Tick extensions outside chart area: theme-aware tick color
+      const tickColor = (this.options.scales.x.ticks && this.options.scales.x.ticks.color) || "#888";
+      ctx.save();
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = tickColor;
+      ctx.globalAlpha = 0.40;
+      for (const crispX of xPositions) {
+        ctx.beginPath();
+        ctx.moveTo(crispX, chartArea.bottom);
         ctx.lineTo(crispX, chartArea.bottom + xGridBottomExtend);
         ctx.stroke();
       }
-
-      ctx.strokeStyle = yGrid;
-      for (let value = 0; value <= 100; value += yStep) {
-        const y = chartArea.bottom - (value / 100) * chartArea.height;
-        const crispY = Math.round(y) + 0.5;
+      for (const crispY of yPositions) {
         ctx.beginPath();
         ctx.moveTo(chartArea.left - yGridLeftExtend, crispY);
-        ctx.lineTo(chartArea.right, crispY);
+        ctx.lineTo(chartArea.left, crispY);
         ctx.stroke();
       }
       ctx.restore();
@@ -388,7 +436,8 @@
         ctx.lineTo(points[i].x, points[i].y);
       }
       const lineWidth = dataset.borderWidth || 2;
-      const outlineWidth = lineWidth + Math.max(1, Math.round((this._uiScale || getUiScale()) * 1));
+      const uiS = this._uiScale || getUiScale();
+      const outlineWidth = lineWidth + Math.max(0.5, Math.round(1.5 * uiS));
       ctx.lineJoin = "round";
       ctx.lineCap = "round";
       ctx.strokeStyle = "#ffffff";
@@ -410,9 +459,9 @@
       const xFont = layout.xTickFont;
       const yFont = layout.yTickFont;
       const yTitleFont = layout.titleFont;
-      const tickStepMinutes = getXAxisTickStepMinutes(chartArea.width);
       const uiScale = this._uiScale || getUiScale();
-      const yStep = getBrightnessTickStep(chartArea.height);
+      const tickStepMinutes = getXAxisTickStepMinutes(chartArea.width, uiScale);
+      const yStep = getBrightnessTickStep(chartArea.height, uiScale);
 
       ctx.save();
       ctx.fillStyle = yTickColor;
@@ -461,29 +510,41 @@
       }
 
       const uiScale = this._uiScale || getUiScale();
-      const { x, y } = this._hoverPoint;
+      const { x, y, color } = this._hoverPoint;
       const canvasRect = this.canvas.getBoundingClientRect();
       const parentRect = (this.canvas.parentElement || this.canvas).getBoundingClientRect();
       const canvasOffsetX = canvasRect.left - parentRect.left;
       const canvasOffsetY = canvasRect.top - parentRect.top;
-      const size = Math.max(11, Math.round(10 * uiScale));
-      const ringW = Math.max(2, Math.round(2 * uiScale));
+      const px = Math.round(canvasOffsetX + x);
+      const py = Math.round(canvasOffsetY + y);
 
-      this._hoverMarkerEl.style.width = `${size}px`;
-      this._hoverMarkerEl.style.height = `${size}px`;
-      this._hoverMarkerEl.style.left = `${canvasOffsetX + x}px`;
-      this._hoverMarkerEl.style.top = `${canvasOffsetY + y}px`;
-      this._hoverMarkerEl.style.display = "block";
-      // Fully opaque colored glow ring + soft outer glow
-      const glowColor = (this._hoverPoint && this._hoverPoint.color) || "#ffffff";
-      this._hoverMarkerEl.style.boxShadow = `0 0 0 ${ringW}px ${glowColor}, 0 0 ${Math.round(7 * uiScale)}px ${Math.round(2 * uiScale)}px ${glowColor}`;
-      // Subtle scale pulse: briefly enlarge then return
-      this._hoverMarkerEl.style.transform = "translate(-50%, -50%) scale(1.18)";
-      clearTimeout(this._markerScaleTimer);
-      this._markerScaleTimer = setTimeout(() => {
-        if (this._hoverMarkerEl) this._hoverMarkerEl.style.transform = "translate(-50%, -50%) scale(1)";
-      }, 80);
-      this._positionTooltip(canvasOffsetX + x, canvasOffsetY + y, parentRect.width, parentRect.height);
+      // Skip redundant updates when the marker hasn't moved
+      const moved = px !== this._lastMarkerX || py !== this._lastMarkerY;
+      if (moved) {
+        this._lastMarkerX = px;
+        this._lastMarkerY = py;
+        const size = Math.max(4, Math.round(10 * uiScale));
+        this._markerHalf = size / 2;
+        this._hoverMarkerEl.style.width = `${size}px`;
+        this._hoverMarkerEl.style.height = `${size}px`;
+        this._hoverMarkerEl.style.display = "block";
+        // Position via transform only (no left/top = no layout shift / CLS)
+        this._hoverMarkerEl.style.transform = `translate(${px - this._markerHalf}px,${py - this._markerHalf}px) scale(1.18)`;
+        clearTimeout(this._markerScaleTimer);
+        this._markerScaleTimer = setTimeout(() => {
+          if (this._hoverMarkerEl) {
+            this._hoverMarkerEl.style.transform = `translate(${this._lastMarkerX - this._markerHalf}px,${this._lastMarkerY - this._markerHalf}px) scale(1)`;
+          }
+        }, 80);
+      }
+      // Only update glow when color changes
+      const glowColor = color || "#ffffff";
+      if (glowColor !== this._lastGlowColor) {
+        this._lastGlowColor = glowColor;
+        const ringW = Math.max(2, Math.round(2 * uiScale));
+        this._hoverMarkerEl.style.boxShadow = `0 0 0 ${ringW}px ${glowColor}, 0 0 ${Math.round(7 * uiScale)}px ${Math.round(2 * uiScale)}px ${glowColor}`;
+      }
+      this._positionTooltip(px, py, parentRect.width, parentRect.height);
     }
 
     _createHoverTooltipElement() {
@@ -523,9 +584,18 @@
 
     _updateTooltipContent(label, value, hex) {
       if (!this._hoverTooltipEl) return;
-      if (this._ttTimeEl) this._ttTimeEl.textContent = label || "--:--";
-      if (this._ttBrightnessEl) this._ttBrightnessEl.textContent = Number.isFinite(value) ? `${value.toFixed(1)}%` : "--%";
-      if (this._ttHexEl) this._ttHexEl.textContent = hex || "";
+      const valText = Number.isFinite(value) ? `${value.toFixed(1)}%` : "--%";
+      const lbl = label || "--:--";
+      const h = hex || "";
+      // Skip DOM writes when nothing changed (avoids layout thrashing)
+      if (lbl === this._ttLastLabel && valText === this._ttLastVal && h === this._ttLastHex) return;
+      this._ttLastLabel = lbl;
+      this._ttLastVal = valText;
+      this._ttLastHex = h;
+      this._ttContentChanged = true;
+      if (this._ttTimeEl) this._ttTimeEl.textContent = lbl;
+      if (this._ttBrightnessEl) this._ttBrightnessEl.textContent = valText;
+      if (this._ttHexEl) this._ttHexEl.textContent = h;
       if (this._ttSwatchEl) {
         this._ttSwatchEl.style.background = hex || "transparent";
         this._ttSwatchEl.style.display = hex ? "" : "none";
@@ -541,9 +611,15 @@
       let top = markerY - offset;
 
       el.style.display = "block";
-      const rect = el.getBoundingClientRect();
-      const tooltipW = rect.width;
-      const tooltipH = rect.height;
+      // Only measure tooltip size when content changed (avoids forced reflow)
+      if (this._ttContentChanged || !this._ttCachedW) {
+        const rect = el.getBoundingClientRect();
+        this._ttCachedW = rect.width;
+        this._ttCachedH = rect.height;
+        this._ttContentChanged = false;
+      }
+      const tooltipW = this._ttCachedW;
+      const tooltipH = this._ttCachedH;
 
       if (left + tooltipW > containerW - 4) {
         left = markerX - offset - tooltipW;
@@ -554,8 +630,8 @@
       if (top + tooltipH > containerH - 4) {
         top = containerH - tooltipH - 4;
       }
-      el.style.left = `${Math.round(left)}px`;
-      el.style.top = `${Math.round(top)}px`;
+      // Position via transform only (no left/top = no layout shift / CLS)
+      el.style.transform = `translate(${Math.round(left)}px,${Math.round(top)}px)`;
     }
 
     _createTrailCanvas() {
@@ -588,12 +664,32 @@
     }
 
     _pushTrailPoint(px, py) {
-      if (this._trailPoints.length > 0) {
-        const last = this._trailPoints[this._trailPoints.length - 1];
-        if (Math.hypot(px - last.x, py - last.y) < 2) return;
+      const pts = this._trailPoints;
+      const now = performance.now();
+      if (pts.length > 0) {
+        const last = pts[pts.length - 1];
+        const gap = Math.hypot(px - last.x, py - last.y);
+        if (gap < 0.5) return;
+        // Track smoothed speed for speed-dependent max trail length.
+        const timeSince = now - (this._trailLastPushTime || 0);
+        const speed = timeSince > 0 ? gap / (timeSince / 1000) : 0;
+        this._trailSpeed = this._trailSpeed
+          ? this._trailSpeed * 0.7 + speed * 0.3
+          : speed;
+        // Any re-entry after the cursor left starts a fresh trail.
+        // The old trail is preserved as a fading ghost snapshot.
+        if (this._trailAbandoned) {
+          this._snapshotTrailGhost();
+          pts.length = 0;
+          this._trailTailDist = 0;
+        }
       }
-      this._trailPoints.push({ x: px, y: py });
+      this._trailAbandoned = false;
+      this._trailFadeAlpha = 1;
+      this._trailLastPushTime = now;
+      pts.push({ x: px, y: py });
       this._trailHasFresh = true;
+      this._trailLastFreshTime = now;
       if (!this._trailRafId) {
         this._lastTrailFrame = performance.now();
         this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
@@ -617,35 +713,81 @@
       this._lastTrailFrame = now;
 
       const uiScale = this._uiScale || getUiScale();
-      const maxLength = Math.max(100, Math.round(200 * uiScale));
+      const chartW = Math.max(1, this.chartArea && this.chartArea.width || 200);
+      const chartH = Math.max(1, this.chartArea && this.chartArea.height || 100);
+      // Aspect-corrected distances: normalize both axes to equal weight
+      // so horizontal and vertical trails feel the same length.
+      const gm = Math.sqrt(chartW * chartH);
+      const sx = gm / chartW;
+      const sy = gm / chartH;
+      const seg = (ax, ay, bx, by) => Math.hypot((bx - ax) * sx, (by - ay) * sy);
+      // Speed-dependent max length: shorter for medium, longer for fast.
+      const speedRatio = Math.min(1, (this._trailSpeed || 0) / 400);
+      const baseMaxLength = Math.max(50, Math.round(gm * (0.25 + speedRatio * 0.40)));
       const thick = Math.max(0.5, 2 * uiScale - 1);
 
       const pts = this._trailPoints;
 
-      // Compute total arc length for soft-cap contraction
+      // Compute total arc length (aspect-corrected) for soft-cap contraction
       let totalArc = 0;
       for (let i = pts.length - 1; i > 0; i--) {
-        totalArc += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+        totalArc += seg(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
       }
 
-      // Contraction: always-on base rate when idle; when moving, only
-      // a soft cap gently trims excess length instead of a hard splice.
-      const baseRate = maxLength * 2.5;
-      if (!this._trailHasFresh) {
-        this._trailTailDist += baseRate * dt / 1000;
-      } else if (totalArc > maxLength) {
-        const excess = totalArc - maxLength;
-        this._trailTailDist += excess * 0.15;
+      // Turn detection: winding trails contract faster than straight ones.
+      let windiness = 0;
+      if (pts.length >= 2 && totalArc > 10) {
+        const chord = seg(pts[0].x, pts[0].y, pts[pts.length - 1].x, pts[pts.length - 1].y);
+        windiness = Math.max(0, 1 - chord / totalArc);
       }
+
+      // Contraction rates depend on hover state and recency of movement.
+      const dtSec = dt / 1000;
+      const hovering = this._tooltipVisible;
+      const turnBoost = windiness * 60 * dtSec;
+      // Windiness temporarily shortens the max length so turns cause
+      // the trail to contract aggressively via the excess mechanism.
+      const maxLength = baseMaxLength * (1 - windiness * 0.6);
+      if (!this._trailHasFresh) {
+        // Decay speed when idle so maxLength shrinks with the trail.
+        this._trailSpeed = (this._trailSpeed || 0) * Math.max(0, 1 - dtSec * 3);
+        if (hovering) {
+          // Fast idle contraction matching the old trail's snappy feel.
+          this._trailTailDist += (15 + totalArc * 2.0) * dtSec;
+        } else {
+          // Cursor left: short grace, then fast decay.
+          const sinceLeft = now - (this._trailLeftTime || now);
+          const leftRamp = Math.min(1, Math.max(0, (sinceLeft - 100) / 200));
+          this._trailTailDist += (20 + leftRamp * Math.max(120, totalArc * 3.0)) * dtSec;
+        }
+      } else {
+        // Active movement: contraction keeps medium-speed trails short.
+        this._trailTailDist += totalArc * 1.0 * dtSec;
+      }
+      // Excess contraction applies in ALL states (active, idle, left)
+      // so over-maxLength trails always get aggressive contraction.
+      if (totalArc > maxLength) {
+        const excess = totalArc - maxLength;
+        const ratio = Math.min(excess / maxLength, 1);
+        this._trailTailDist += excess * (2.5 + 22.0 * ratio) * dtSec;
+      }
+      this._trailTailDist += turnBoost;
       this._trailHasFresh = false;
+
+      // Global opacity: ramp to 1 when hovering, ramp to 0 when cursor left
+      if (hovering) {
+        this._trailFadeAlpha = Math.min(1, (this._trailFadeAlpha ?? 1) + dtSec * 8);
+      } else {
+        this._trailFadeAlpha = Math.max(0, (this._trailFadeAlpha ?? 1) - dtSec * 2.5);
+      }
 
       // Remove points fully consumed by contraction
       let consumedArc = 0;
       let consumed = 0;
       for (let i = 0; i < pts.length - 1; i++) {
-        const seg = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
-        if (consumedArc + seg <= this._trailTailDist) {
-          consumedArc += seg;
+        const s = seg(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y);
+        if (consumedArc + s <= this._trailTailDist) {
+          consumedArc += s;
           consumed++;
         } else {
           break;
@@ -658,8 +800,27 @@
 
       ctx.clearRect(0, 0, w, h);
 
+      // Draw fading ghost trail from a previous hover session
+      let hasGhost = this._trailGhostAlpha > 0.01;
+      if (hasGhost && this._trailGhostCanvas) {
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalAlpha = this._trailGhostAlpha;
+        ctx.drawImage(this._trailGhostCanvas, 0, 0);
+        ctx.restore();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        this._trailGhostAlpha -= dtSec * 2.5;
+        if (this._trailGhostAlpha <= 0.01) {
+          this._trailGhostAlpha = 0;
+          hasGhost = false;
+        }
+      }
+
       if (pts.length < 2) {
         this._trailTailDist = 0;
+        if (hasGhost || hovering) {
+          this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
+        }
         return;
       }
 
@@ -668,89 +829,139 @@
       const offX = canvasRect.left - parentRect.left;
       const offY = canvasRect.top - parentRect.top;
 
-      // Cumulative arc distance from tail (index 0) for each point
+      // Interpolate visual tail start within the first segment so
+      // contraction appears smooth instead of snapping to discrete points.
+      let startX = pts[0].x;
+      let startY = pts[0].y;
+      const firstSeg = seg(pts[0].x, pts[0].y, pts[1].x, pts[1].y);
+      if (firstSeg > 0 && this._trailTailDist > 0) {
+        const t = Math.min(this._trailTailDist / firstSeg, 1);
+        startX = pts[0].x + (pts[1].x - pts[0].x) * t;
+        startY = pts[0].y + (pts[1].y - pts[0].y) * t;
+      }
+
+      // Cumulative arc distance from interpolated start (aspect-corrected)
       const arcDist = new Array(pts.length);
       arcDist[0] = 0;
-      for (let i = 1; i < pts.length; i++) {
-        arcDist[i] = arcDist[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+      arcDist[1] = firstSeg > 0 ? firstSeg - Math.min(this._trailTailDist, firstSeg) : 0;
+      for (let i = 2; i < pts.length; i++) {
+        arcDist[i] = arcDist[i - 1] + seg(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
       }
       const trailLen = arcDist[pts.length - 1] || 1;
+
+      // Trail too short to render meaningfully: clear to avoid final-frame blip
+      if (trailLen < 1) {
+        pts.length = 0;
+        this._trailTailDist = 0;
+        if (hasGhost) {
+          this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
+        }
+        return;
+      }
+
+      // Fade entire trail as it gets very short so it dissolves to nothing
+      // before any rendering artifact can appear. Also apply global fade.
+      const fadeOutPx = 20;
+      const shortAlpha = trailLen < fadeOutPx ? (trailLen / fadeOutPx) ** 2 : 1;
+      ctx.globalAlpha = shortAlpha * (this._trailFadeAlpha ?? 1);
+
       const tailEnd = trailLen * 0.55;
 
       ctx.lineWidth = thick;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
 
-      // 1. Draw entire trail as one continuous path at full opacity
+      // 1. Draw entire trail as one continuous path at full opacity (round caps)
       ctx.beginPath();
-      ctx.moveTo(offX + pts[0].x, offY + pts[0].y);
+      ctx.moveTo(offX + startX, offY + startY);
       for (let i = 1; i < pts.length; i++) {
         ctx.lineTo(offX + pts[i].x, offY + pts[i].y);
       }
       ctx.strokeStyle = "#ffffff";
       ctx.stroke();
 
-      // 2. Erase tail with a single gradient destination-out pass.
-      // Linear gradient from full erase at tail tip to zero at boundary.
+      // 2. Erase tail: per-segment fade based on arc distance so the fade
+      // follows the trail path exactly (no spatial gradient artifacts at bends).
       ctx.globalCompositeOperation = "destination-out";
-      let fadeIdx = pts.length - 1;
-      for (let i = 1; i < pts.length; i++) {
-        if (arcDist[i] >= tailEnd) { fadeIdx = i; break; }
-      }
-      const tx0 = offX + pts[0].x;
-      const ty0 = offY + pts[0].y;
-      const tx1 = offX + pts[fadeIdx].x;
-      const ty1 = offY + pts[fadeIdx].y;
-      if (Math.hypot(tx1 - tx0, ty1 - ty0) > 4) {
-        const tailGrad = ctx.createLinearGradient(tx0, ty0, tx1, ty1);
-        tailGrad.addColorStop(0, "rgba(0,0,0,1)");
-        tailGrad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.lineCap = "butt";
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (arcDist[i] >= tailEnd) break;
+        const a0 = Math.max(0, 1 - arcDist[i] / tailEnd);
+        const a1 = Math.max(0, 1 - arcDist[i + 1] / tailEnd);
+        if (a0 < 0.001 && a1 < 0.001) continue;
+        const fx = offX + (i === 0 ? startX : pts[i].x);
+        const fy = offY + (i === 0 ? startY : pts[i].y);
+        const ex = offX + pts[i + 1].x;
+        const ey = offY + pts[i + 1].y;
+        if (Math.hypot(ex - fx, ey - fy) < 0.5) continue;
+        const g = ctx.createLinearGradient(fx, fy, ex, ey);
+        g.addColorStop(0, `rgba(0,0,0,${a0})`);
+        g.addColorStop(1, `rgba(0,0,0,${a1})`);
         ctx.beginPath();
-        ctx.moveTo(tx0, ty0);
-        for (let i = 1; i <= fadeIdx; i++) {
-          ctx.lineTo(offX + pts[i].x, offY + pts[i].y);
-        }
-        ctx.strokeStyle = tailGrad;
+        ctx.moveTo(fx, fy);
+        ctx.lineTo(ex, ey);
+        ctx.strokeStyle = g;
         ctx.stroke();
       }
 
-      // 3. Head fade: fixed pixel size, not proportional to trail length
-      const headFadePx = Math.max(8, Math.round(15 * uiScale));
-      const headDist = trailLen - headFadePx;
-      if (headDist > 0) {
-        let headI = pts.length - 1;
-        for (let i = pts.length - 1; i > 0; i--) {
-          if (arcDist[i] <= headDist) { headI = i; break; }
-        }
-        if (headI < pts.length - 1) {
-          const hx0 = offX + pts[headI].x;
-          const hy0 = offY + pts[headI].y;
-          const hx1 = offX + pts[pts.length - 1].x;
-          const hy1 = offY + pts[pts.length - 1].y;
-          if (Math.hypot(hx1 - hx0, hy1 - hy0) > 3) {
-            const headGrad = ctx.createLinearGradient(hx0, hy0, hx1, hy1);
-            headGrad.addColorStop(0, "rgba(0,0,0,0)");
-            headGrad.addColorStop(1, "rgba(0,0,0,0.6)");
-            ctx.beginPath();
-            ctx.moveTo(hx0, hy0);
-            for (let i = headI + 1; i < pts.length; i++) {
-              ctx.lineTo(offX + pts[i].x, offY + pts[i].y);
-            }
-            ctx.strokeStyle = headGrad;
-            ctx.stroke();
-          }
+      // 3. Head fade: very subtle normally, strengthens as the trail
+      // approaches the hover marker diameter for smooth disappearance.
+      const markerDiam = Math.max(6, Math.round(14 * uiScale));
+      const shortThresh = markerDiam * 2;
+      const shortness = trailLen < shortThresh ? 1 - trailLen / shortThresh : 0;
+      const headFadePx = Math.max(4, Math.round((4 + shortness * 8) * uiScale));
+      const headMaxAlpha = 0.15 + shortness * 0.35;
+      const headStart = trailLen - headFadePx;
+      if (headStart > 0 && shortness < 0.5) {
+        for (let i = pts.length - 2; i >= 0; i--) {
+          if (arcDist[i + 1] <= headStart) break;
+          const d0 = arcDist[i];
+          const d1 = arcDist[i + 1];
+          const a0 = d0 >= headStart ? Math.min(headMaxAlpha, ((d0 - headStart) / headFadePx) * headMaxAlpha) : 0;
+          const a1 = d1 >= headStart ? Math.min(headMaxAlpha, ((d1 - headStart) / headFadePx) * headMaxAlpha) : 0;
+          if (a0 < 0.001 && a1 < 0.001) continue;
+          const fx = offX + (i === 0 ? startX : pts[i].x);
+          const fy = offY + (i === 0 ? startY : pts[i].y);
+          const ex = offX + pts[i + 1].x;
+          const ey = offY + pts[i + 1].y;
+          if (Math.hypot(ex - fx, ey - fy) < 0.5) continue;
+          const g = ctx.createLinearGradient(fx, fy, ex, ey);
+          g.addColorStop(0, `rgba(0,0,0,${a0})`);
+          g.addColorStop(1, `rgba(0,0,0,${a1})`);
+          ctx.beginPath();
+          ctx.moveTo(fx, fy);
+          ctx.lineTo(ex, ey);
+          ctx.strokeStyle = g;
+          ctx.stroke();
         }
       }
 
       ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1;
 
       this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
+    }
+
+    _snapshotTrailGhost() {
+      const c = this._trailCanvas;
+      if (!c || !c.width || !c.height) return;
+      if (this._trailPoints.length < 3) return;
+      if (!this._trailGhostCanvas) {
+        this._trailGhostCanvas = document.createElement("canvas");
+      }
+      const gc = this._trailGhostCanvas;
+      gc.width = c.width;
+      gc.height = c.height;
+      gc.getContext("2d").drawImage(c, 0, 0);
+      this._trailGhostAlpha = 1.0;
     }
 
     _clearTrail() {
       this._trailPoints.length = 0;
       this._trailTailDist = 0;
       this._lastTrailFrame = 0;
+      this._trailGhostAlpha = 0;
+      this._trailFadeAlpha = 1;
       if (this._trailRafId) {
         cancelAnimationFrame(this._trailRafId);
         this._trailRafId = null;
@@ -765,6 +976,7 @@
     _createHoverMarkerElement() {
       const el = document.createElement("div");
       const parent = this.canvas.parentElement || document.body;
+      const s = this._uiScale || getUiScale();
       el.className = "chart-hover-marker";
       el.style.position = "absolute";
       el.style.left = "0";
@@ -773,14 +985,13 @@
       el.style.pointerEvents = "none";
       el.style.zIndex = "29";
       el.style.borderRadius = "999px";
-      el.style.background = "radial-gradient(circle, #ffffff 1.5px, transparent 2px)";
+      el.style.background = `radial-gradient(circle, #ffffff ${1.5 * s}px, transparent ${2 * s}px)`;
       el.style.border = "none";
       el.style.boxSizing = "border-box";
       el.style.backdropFilter = "invert(1) grayscale(1)";
       el.style.webkitBackdropFilter = "invert(1) grayscale(1)";
-      el.style.transform = "translate(-50%, -50%) scale(1)";
       el.style.transformOrigin = "center center";
-      el.style.transition = "transform 120ms ease-out, box-shadow 180ms ease-out";
+      el.style.transition = "transform 30ms ease-out, box-shadow 180ms ease-out";
       parent.appendChild(el);
       return el;
     }
@@ -848,7 +1059,15 @@
       if (this._hoverTooltipEl) {
         this._hoverTooltipEl.style.display = "none";
       }
-      this._clearTrail();
+      this._trailAbandoned = true;
+      this._trailLeftTime = performance.now();
+      // Let trail fade naturally via idle contraction instead of instant clear.
+      // Ensure animation loop keeps running for trail or ghost fade.
+      const hasTrailOrGhost = this._trailPoints.length >= 2 || this._trailGhostAlpha > 0.01;
+      if (hasTrailOrGhost && !this._trailRafId) {
+        this._lastTrailFrame = performance.now();
+        this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
+      }
       if (shouldRedraw !== false) {
         this.draw();
       }
@@ -874,6 +1093,17 @@
     }
 
     _handlePointerMove(event) {
+      // RAF-throttle: coalesce rapid pointer events into one update per frame
+      this._pendingPointerEvent = event;
+      if (!this._pointerRafId) {
+        this._pointerRafId = requestAnimationFrame(() => {
+          this._pointerRafId = null;
+          if (this._pendingPointerEvent) this._processPointerMove(this._pendingPointerEvent);
+        });
+      }
+    }
+
+    _processPointerMove(event) {
       if (!this.chartArea || !this.chartArea.width || !this.chartArea.height) return;
 
       const canvasRect = this.canvas.getBoundingClientRect();
@@ -984,7 +1214,10 @@
 
       this._pushTrailPoint(bestX, bestY);
 
-      this.draw();
+      // Only update the hover marker and tooltip (DOM overlays), not the
+      // full chart. The full draw() redraws grid, gradient, dataset, and
+      // axes on every pointer event which is unnecessary and expensive.
+      this._drawHoverPoint();
     }
 
     _handleChartClick(event) {

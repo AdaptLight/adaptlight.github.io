@@ -26,15 +26,19 @@
       html:not([data-theme="dark"]) { background: #f5f5f5; color-scheme: only light; }
     }
   </style>
+  <link rel="icon" href="resources/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="resources/style.css">
 </head>
 <body>
 
   <aside id="sidebar">
     <div class="sidebar-header">
-      <div class="sidebar-title">
-        <img src="resources/icon.png" alt="" width="20" height="20">
-        <h1>AdaptLight</h1>
+      <div class="sidebar-title-block">
+        <a class="sidebar-title" href="https://github.com/AdaptLight/adapt-light" target="_blank" rel="noopener noreferrer">
+          <img src="resources/icon.svg" alt="" width="20" height="20">
+          <h1>AdaptLight</h1>
+        </a>
+        <span class="sidebar-subtitle">Visualizer</span>
       </div>
       <div class="header-buttons">
         <button id="themeToggle" type="button" title="Toggle light/dark mode">
@@ -42,34 +46,39 @@
           <svg id="themeIconMoon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         </button>
         <button id="sidebarHide" type="button" title="Hide sidebar">
-          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><polyline points="15 8 12 12 15 16"/></svg>
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><polyline points="15 8 12 12 15 16"/></svg>
         </button>
       </div>
     </div>
 
-    <section class="control-group">
-      <h2>Curve Type</h2>
-      <div class="toggle-row">
-        <label for="curveType">Ramp Shape</label>
-        <select id="curveType">
-          <option value="linear" selected>Linear</option>
-          <option value="smooth">Smooth</option>
-          <option value="steep">Steep</option>
-          <option value="ease_in">Ease In</option>
-          <option value="ease_out">Ease Out</option>
-        </select>
-      </div>
-    </section>
+    <div class="curve-type-row">
+      <section class="control-group">
+        <h2>Curve Type</h2>
+        <div class="toggle-row">
+          <select id="curveType">
+            <option value="linear" selected>Linear</option>
+            <option value="smooth">Smooth/Cosine</option>
+            <option value="steep">Steep/Tanh</option>
+            <option value="ease_in">Ease-in</option>
+            <option value="ease_out">Ease-out</option>
+          </select>
+        </div>
+      </section>
+      <button id="overlayToggle" type="button" title="Toggle grid & time overlay">
+        <svg id="overlayIconShow" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg id="overlayIconHide" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
 
     <section class="control-group">
       <h2>Brightness</h2>
       <div class="slider-row">
-        <label>Min</label>
+        <label for="minBrightness">Min</label>
         <input type="range" id="minBrightness" min="0" max="100" value="10">
         <input type="number" class="num-input" id="minBrightnessNum" min="0" max="100" value="10">
       </div>
       <div class="slider-row">
-        <label>Max</label>
+        <label for="maxBrightness">Max</label>
         <input type="range" id="maxBrightness" min="0" max="100" value="100">
         <input type="number" class="num-input" id="maxBrightnessNum" min="0" max="100" value="100">
       </div>
@@ -79,11 +88,11 @@
       <h2>Timing</h2>
       <div class="time-row">
         <label for="wakeStart">Wake start</label>
-        <input type="time" id="wakeStart" value="06:00">
+        <input type="time" id="wakeStart" value="07:00">
       </div>
       <div class="time-row">
         <label for="wakeEnd">Wake end</label>
-        <input type="time" id="wakeEnd" value="08:00">
+        <input type="time" id="wakeEnd" value="09:00">
       </div>
       <div class="time-row">
         <label for="dozeStart">Doze start</label>
@@ -123,12 +132,12 @@
     <section class="control-group">
       <h2>Color</h2>
       <div class="slider-row">
-        <label>Temp min</label>
-        <input type="range" id="minColorTemp" min="1000" max="10000" step="100" value="2200">
-        <input type="number" class="num-input" id="minColorTempNum" min="1000" max="10000" step="100" value="2200">
+        <label for="minColorTemp">Temp min</label>
+        <input type="range" id="minColorTemp" min="1000" max="10000" step="100" value="2700">
+        <input type="number" class="num-input" id="minColorTempNum" min="1000" max="10000" step="100" value="2700">
       </div>
       <div class="slider-row">
-        <label>Temp max</label>
+        <label for="maxColorTemp">Temp max</label>
         <input type="range" id="maxColorTemp" min="1000" max="10000" step="100" value="5500">
         <input type="number" class="num-input" id="maxColorTempNum" min="1000" max="10000" step="100" value="5500">
       </div>
@@ -142,12 +151,12 @@
       <div id="rgbControls" style="display:none;">
         <div class="color-row">
           <label for="rgbStartColor">Start color</label>
-          <input type="color" id="rgbStartColor" value="#ff8800">
+          <input type="color" id="rgbStartColor" value="#ff8000">
           <button id="rgbStartColorReset" type="button" class="color-reset-btn" title="Reset start color">Reset</button>
         </div>
         <div class="color-row">
           <label for="rgbEndColor">End color</label>
-          <input type="color" id="rgbEndColor" value="#3388ff">
+          <input type="color" id="rgbEndColor" value="#bddfff">
           <button id="rgbEndColorReset" type="button" class="color-reset-btn" title="Reset end color">Reset</button>
         </div>
       </div>
@@ -161,10 +170,15 @@
       </div>
       <div id="sunShiftControls" style="display:none;">
         <div class="slider-row">
-          <label>Strength</label>
+          <label for="sunShiftStrength">Strength</label>
           <input type="range" id="sunShiftStrength" min="0" max="30" step="1" value="10">
           <input type="number" class="num-input" id="sunShiftStrengthNum" min="0" max="30" step="1" value="10">
         </div>
+        <div class="toggle-row">
+          <input type="checkbox" id="useLocation">
+          <label for="useLocation">Use my location</label>
+        </div>
+        <span id="locationStatus" class="location-status"></span>
         <div class="time-row">
           <label for="sunrise">Sunrise</label>
           <input type="time" id="sunrise" value="06:30">
@@ -184,19 +198,19 @@
       </div>
       <div id="luxControls" style="display:none;">
         <div class="slider-row">
-          <label>Strength</label>
+          <label for="luxStrength">Strength</label>
           <input type="range" id="luxStrength" min="0" max="20" step="1" value="10">
           <input type="number" class="num-input" id="luxStrengthNum" min="0" max="20" step="1" value="10">
         </div>
         <div class="slider-row">
-          <label>Current lux</label>
+          <label for="currentLux">Current lux</label>
           <input type="range" id="currentLux" min="0" max="90000" step="100" value="5000">
           <input type="number" class="num-input" id="currentLuxNum" min="0" max="90000" step="100" value="5000">
         </div>
         <div class="slider-row">
-          <label>Max lux</label>
-          <input type="range" id="effectiveMax" min="1" max="100000" step="100" value="10000">
-          <input type="number" class="num-input" id="effectiveMaxNum" min="1" max="100000" step="100" value="10000">
+          <label for="effectiveMax">Max lux</label>
+          <input type="range" id="effectiveMax" min="100" max="100000" step="100" value="10000">
+          <input type="number" class="num-input" id="effectiveMaxNum" min="100" max="100000" step="100" value="10000">
         </div>
       </div>
     </section>
@@ -215,6 +229,7 @@
   </main>
 
   <script src="resources/chart-lite.js"></script>
+  <script src="resources/sun.js"></script>
   <script src="resources/engine.js"></script>
   <script src="resources/app.js"></script>
 </body>
