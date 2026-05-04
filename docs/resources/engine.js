@@ -1,6 +1,9 @@
 /** biome-ignore-all lint/correctness/noUnusedVariables: wrong in context */
+// ── Time utilities ──
+
 const DAY_S = 86400;
 
+// JS % can return negative values; this guarantees a positive result for circular arithmetic
 function mod(n, m) {
   return ((n % m) + m) % m;
 }
@@ -42,6 +45,8 @@ function easeOut(t) {
   return 1 - (1 - t) * (1 - t);
 }
 
+// ── Curve shaping ──
+
 function shapeCurve(t, curveType) {
   if (curveType === "smooth") return smoothstep(t);
   if (curveType === "steep") return smoothstep2(t);
@@ -55,15 +60,17 @@ function interpolate(t, yStart, yEnd, curveType) {
   return yStart + shaped * (yEnd - yStart);
 }
 
+// Doze ramp goes high→low, so ease directions must be swapped
 const EASE_DOZE_FLIP = { ease_in: "ease_out", ease_out: "ease_in" };
 
 function resolveEaseForDoze(curveType) {
   return EASE_DOZE_FLIP[curveType] || curveType;
 }
 
+// ── Curve evaluation ──
+
 function curveValueAt(now, ws, we, ds, de, minVal, maxVal, curveType) {
-  // Detect backwards ramps: forward duration > 12h means user intended
-  // the short arc in reverse direction
+  // Forward arc > 12h → short arc in reverse
   let wakeRev = false;
   let dozeRev = false;
 
@@ -76,21 +83,12 @@ function curveValueAt(now, ws, we, ds, de, minVal, maxVal, curveType) {
     dozeRev = true;
   }
 
-  const boundaries = [
-    { s: ws, seg: "wake" },
-    { s: we, seg: "hold_wake" },
-    { s: ds, seg: "doze" },
-    { s: de, seg: "hold_doze" },
-  ];
-  let best = "hold_doze";
-  let bestElapsed = DAY_S;
-  for (const { s, seg } of boundaries) {
-    const elapsed = mod(now - s, DAY_S);
-    if (elapsed < bestElapsed) {
-      bestElapsed = elapsed;
-      best = seg;
-    }
-  }
+  // Segment detection via ordered range checks (wake has priority on overlap)
+  let best;
+  if (ws !== we && inCircularRange(now, ws, we))      best = "wake";
+  else if (we !== ds && inCircularRange(now, we, ds))  best = "hold_wake";
+  else if (ds !== de && inCircularRange(now, ds, de))  best = "doze";
+  else                                                 best = "hold_doze";
 
   if (best === "wake") {
     const t = progress(now, ws, we);
@@ -110,8 +108,10 @@ function curveValueAt(now, ws, we, ds, de, minVal, maxVal, curveType) {
   return dozeRev ? maxVal : minVal;
 }
 
+// ── Sun shift ──
+
+// Moves ramp midpoints toward sunrise/sunset while preserving ramp durations
 function applySunShift(ws, we, ds, de, sunriseS, sunsetS, strength) {
-  // Normalize backwards ramps for correct midpoint/duration math
   const wakeRev = mod(we - ws, DAY_S) > DAY_S / 2;
   const dozeRev = mod(de - ds, DAY_S) > DAY_S / 2;
   if (wakeRev) [ws, we] = [we, ws];
@@ -131,22 +131,27 @@ function applySunShift(ws, we, ds, de, sunriseS, sunsetS, strength) {
   let newDs = mod(sunDozeMid - dozeHalf, DAY_S);
   let newDe = mod(sunDozeMid + dozeHalf, DAY_S);
 
-  // Restore reversed order so curveValueAt can detect the reversal
+  // Restore reversed order so curveValueAt still detects the reversal
   if (wakeRev) [newWs, newWe] = [newWe, newWs];
   if (dozeRev) [newDs, newDe] = [newDe, newDs];
 
   return { ws: newWs, we: newWe, ds: newDs, de: newDe };
 }
 
+// ── Lux sensor adjustment ──
+
 function applyLux(curveBrightness, currentLux, effectiveMax, strength, minB, maxB) {
   if (effectiveMax <= 0) return curveBrightness;
-  const luxRatio = clamp(currentLux / effectiveMax, 0, 1);
+  const luxRatio = clamp(Math.max(1, currentLux) / effectiveMax, 0, 1);
   const multiplier = 1 - strength + strength * luxRatio;
-  const lo = Math.min(minB, maxB);
+  const lo = 0;
   const hi = Math.max(minB, maxB);
   return clamp(curveBrightness * multiplier, lo, hi);
 }
 
+// ── Color conversions ──
+
+// sRGB gamma ↔ linear light
 function srgbToLinear(c) {
   return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
 }
@@ -155,6 +160,7 @@ function linearToSrgb(c) {
   return c <= 0.0031308 ? c * 12.92 : 1.055 * (c ** (1.0 / 2.4)) - 0.055;
 }
 
+// Oklab: perceptually uniform
 function rgbToOklab(r, g, b) {
   const rl = srgbToLinear(r / 255);
   const gl = srgbToLinear(g / 255);
@@ -198,6 +204,7 @@ function rgbToHex(r, g, b) {
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
 }
 
+// Normalize to max channel = 255 so color pickers only affect hue, not brightness
 function enforceFullBrightness(hex) {
   const r = parseInt(hex.slice(1, 3), 16) / 255;
   const g = parseInt(hex.slice(3, 5), 16) / 255;
@@ -211,26 +218,22 @@ function enforceFullBrightness(hex) {
   );
 }
 
-function lerpRgb(shapedProgress, startHex, endHex) {
-  const t = clamp(shapedProgress, 0, 1);
-  const sr = parseInt(startHex.slice(1, 3), 16);
-  const sg = parseInt(startHex.slice(3, 5), 16);
-  const sb = parseInt(startHex.slice(5, 7), 16);
-  const er = parseInt(endHex.slice(1, 3), 16);
-  const eg = parseInt(endHex.slice(3, 5), 16);
-  const eb = parseInt(endHex.slice(5, 7), 16);
-
-  const [L1, a1, b1] = rgbToOklab(sr, sg, sb);
-  const [L2, a2, b2] = rgbToOklab(er, eg, eb);
-
-  const [r, g, bVal] = oklabToRgb(
-    L1 + t * (L2 - L1),
-    a1 + t * (a2 - a1),
-    b1 + t * (b2 - b1),
-  );
-  return rgbToHex(r, g, bVal);
+function hexToComponents(hex) {
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
 }
 
+// Precompute start/end in Oklab; returns an interpolation function(t) → hex
+function makeColorLerp(startHex, endHex) {
+  const [sr, sg, sb] = hexToComponents(startHex);
+  const [er, eg, eb] = hexToComponents(endHex);
+  const s = rgbToOklab(sr, sg, sb), e = rgbToOklab(er, eg, eb);
+  return (t) => {
+    const [r, g, b] = oklabToRgb(s[0] + t * (e[0] - s[0]), s[1] + t * (e[1] - s[1]), s[2] + t * (e[2] - s[2]));
+    return rgbToHex(r, g, b);
+  };
+}
+
+// Kelvin → RGB via Tanner Helland's curve-fit approximation
 function kelvinToRgb(kelvin) {
   const temp = kelvin / 100;
   let r, g, b;
@@ -249,6 +252,8 @@ function kelvinToRgb(kelvin) {
     clamp(Math.round(b), 0, 255),
   );
 }
+
+// ── Data generation ──
 
 function generateCurveData(params) {
   const B_POINTS = 1440;
@@ -309,27 +314,15 @@ function generateCurveData(params) {
   const startHex = params.useRgbColor ? enforceFullBrightness(params.rgbStartColor) : null;
   const endHex = params.useRgbColor ? enforceFullBrightness(params.rgbEndColor) : null;
 
-  const startOklab = startHex ? rgbToOklab(
-    parseInt(startHex.slice(1, 3), 16),
-    parseInt(startHex.slice(3, 5), 16),
-    parseInt(startHex.slice(5, 7), 16),
-  ) : null;
-  const endOklab = endHex ? rgbToOklab(
-    parseInt(endHex.slice(1, 3), 16),
-    parseInt(endHex.slice(3, 5), 16),
-    parseInt(endHex.slice(5, 7), 16),
-  ) : null;
+  const colorLerp = (startHex && endHex)
+    ? makeColorLerp(startHex, endHex)
+    : null;
 
   for (let i = 0; i < C_POINTS; i++) {
     const now = i * cStep;
-    if (params.useRgbColor) {
+    if (params.useRgbColor && colorLerp) {
       const t = clamp(curveValueAt(now, cws, cwe, cds, cde, 0, 1, params.curveType), 0, 1);
-      const [r, g, bVal] = oklabToRgb(
-        startOklab[0] + t * (endOklab[0] - startOklab[0]),
-        startOklab[1] + t * (endOklab[1] - startOklab[1]),
-        startOklab[2] + t * (endOklab[2] - startOklab[2]),
-      );
-      colorHex.push(rgbToHex(r, g, bVal));
+      colorHex.push(colorLerp(t));
     } else {
       const cVal = curveValueAt(now, cws, cwe, cds, cde,
         params.minColorTemp, params.maxColorTemp, params.curveType);

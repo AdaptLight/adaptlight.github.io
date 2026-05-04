@@ -1,4 +1,5 @@
 /** biome-ignore-all lint/complexity/useOptionalChain: idk */
+// Lightweight Chart.js-compatible canvas renderer. Exposed as window.Chart.
 (() => {
 
   const registeredPlugins = [];
@@ -21,6 +22,22 @@
     const m = minute % 60;
     return `${pad2(h)}:${pad2(m)}`;
   }
+
+  function formatTimeLabel(hhmm) {
+    if (localStorage.getItem("clockFormat") !== "12") {
+      const colon = hhmm.indexOf(":");
+      if (colon > 0) return `${parseInt(hhmm.slice(0, colon), 10)}:${hhmm.slice(colon + 1)}`;
+      return hhmm;
+    }
+    const parts = hhmm.split(":");
+    if (parts.length < 2) return hhmm;
+    let h = parseInt(parts[0], 10);
+    const suffix = h >= 12 ? " PM" : " AM";
+    h = h % 12 || 12;
+    return { time: `${h}:${parts[1]}`, suffix };
+  }
+
+  function isCompoundLabel(v) { return v && typeof v === "object" && "time" in v; }
 
   function fontString(size, weight, family) {
     return `${weight ? `${weight} ` : ""}${size}px ${family || "sans-serif"}`;
@@ -55,6 +72,7 @@
     return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
   }
 
+  // Intentional copy of getUiScale — each module reads the CSS var independently so they stay self-contained.
   function getUiScale() {
     const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
     const value = Number.parseFloat(raw);
@@ -81,7 +99,6 @@
       if (!ctx || !ctx.canvas) {
         throw new Error("LiteChart requires a 2D canvas context.");
       }
-
       this.ctx = ctx;
       this.canvas = ctx.canvas;
       this.canvas.style.display = "block";
@@ -114,24 +131,33 @@
       this.colorHexCache = [];
       this._uiScale = getUiScale();
       this._hoverPoint = null;
+      this._markerLocked = false;
+      this._lockedIndex = null;
+      this._holdTimer = null;
+      this._holdStartX = 0;
+      this._holdStartY = 0;
+      this._markerFadeTimer = null;
       this._trailCanvas = this._createTrailCanvas();
       this._trailCtx = this._trailCanvas.getContext("2d");
-      this._trailPoints = [];       // position buffer: { x, y }
+      this._trailPoints = [];
       this._trailRafId = null;
-      this._trailTailDist = 0;       // arc length consumed from oldest end
-      this._lastTrailFrame = 0;      // timestamp of last animation frame
+      this._trailTailDist = 0;
+      this._lastTrailFrame = 0;
       this._hoverMarkerEl = this._createHoverMarkerElement();
-      this._hoverTooltipEl = this._createHoverTooltipElement();
+      this._hoverMarkerInner = this._hoverMarkerEl.firstChild || null;
+      this._hoverTooltipEl = null;
       this._boundMove = this._handlePointerMove.bind(this);
-      this._boundClick = this._handleChartClick.bind(this);
+      this._boundDown = this._handlePointerDown.bind(this);
+      this._boundUp = this._handlePointerUp.bind(this);
       this._boundLeave = this._hideTooltip.bind(this);
+      this._boundCancel = () => { this._markerLocked = false; clearTimeout(this._holdTimer); this._holdTimer = null; if (this._hoverTooltipEl) this._hoverTooltipEl.style.pointerEvents = ""; this._hideTooltip(); };
       this._boundResize = this.resize.bind(this);
 
       this.canvas.addEventListener("pointermove", this._boundMove);
-      this.canvas.addEventListener("pointerdown", this._boundMove);
-      this.canvas.addEventListener("click", this._boundClick);
+      this.canvas.addEventListener("pointerdown", this._boundDown);
+      this.canvas.addEventListener("pointerup", this._boundUp);
       this.canvas.addEventListener("pointerleave", this._boundLeave);
-      this.canvas.addEventListener("pointercancel", this._boundLeave);
+      this.canvas.addEventListener("pointercancel", this._boundCancel);
       window.addEventListener("resize", this._boundResize);
 
       this.resize();
@@ -146,11 +172,12 @@
 
     destroy() {
       this.canvas.removeEventListener("pointermove", this._boundMove);
-      this.canvas.removeEventListener("pointerdown", this._boundMove);
-      this.canvas.removeEventListener("click", this._boundClick);
+      this.canvas.removeEventListener("pointerdown", this._boundDown);
+      this.canvas.removeEventListener("pointerup", this._boundUp);
       this.canvas.removeEventListener("pointerleave", this._boundLeave);
-      this.canvas.removeEventListener("pointercancel", this._boundLeave);
+      this.canvas.removeEventListener("pointercancel", this._boundCancel);
       window.removeEventListener("resize", this._boundResize);
+      clearTimeout(this._holdTimer);
       if (this._trailRafId) { cancelAnimationFrame(this._trailRafId); this._trailRafId = null; }
       if (this._trailCanvas && this._trailCanvas.parentNode) {
         this._trailCanvas.parentNode.removeChild(this._trailCanvas);
@@ -164,6 +191,7 @@
     }
 
     resize() {
+      this._uiScale = getUiScale();
       const parent = this.canvas.parentElement;
       if (!parent) return;
 
@@ -196,12 +224,15 @@
       this.canvas.style.height = `${cssHeight}px`;
 
       this.ctx.setTransform(this._dpr, 0, 0, this._dpr, 0, 0);
+
       this._clearTrail();
       this._hideTooltip(false);
       this.draw();
+      if (this._markerLocked) this._updateLockedMarker();
     }
 
     update() {
+      this._uiScale = getUiScale();
       this.draw();
     }
 
@@ -227,6 +258,7 @@
       this._drawAxes(layout);
       this._drawHoverPoint();
       this._callPlugins("afterDraw");
+      if (this._markerLocked) this._updateLockedMarker();
     }
 
     _callPlugins(hook) {
@@ -255,16 +287,17 @@
       const labels = ensurePathArray(this.data && this.data.labels);
       const dataset = this.data && this.data.datasets && this.data.datasets[0];
       const values = ensurePathArray(dataset && dataset.data);
-      const labelSample = labels.length ? labels[0] : minuteLabel(0);
+      const labelSampleRaw = formatTimeLabel(labels.length ? labels[0] : minuteLabel(0));
+      const labelSampleText = isCompoundLabel(labelSampleRaw) ? labelSampleRaw.time : labelSampleRaw;
       const titlePadding = Number(this.options.scales.yBrightness.title && this.options.scales.yBrightness.title.padding) || 0;
       const yTickWidth = Math.max(
         measureTextWidth(this.ctx, "0", yTickFont),
         measureTextWidth(this.ctx, "100", yTickFont)
       );
-      const left = Math.max(Math.round(52 * uiScale), Math.ceil(yTickWidth + Math.round(10 * uiScale) + titlePadding));
+      const left = Math.max(Math.round(47 * uiScale), Math.ceil(yTickWidth + Math.round(10 * uiScale) + titlePadding));
       const right = Math.round(16 * uiScale);
       const top = Math.round(20 * uiScale);
-      const bottom = Math.max(Math.round(44 * uiScale), Math.ceil(measureTextWidth(this.ctx, labelSample, xTickFont) * 0.62 + Math.round(24 * uiScale)));
+      const bottom = Math.max(Math.round(44 * uiScale), Math.ceil(measureTextWidth(this.ctx, labelSampleText, xTickFont) * 0.62 + Math.round(24 * uiScale)));
       const chartArea = {
         left,
         top,
@@ -281,6 +314,7 @@
         labels,
         values,
         xTickFont,
+        xTickFontSize,
         yTickFont,
         titleFont,
       };
@@ -323,7 +357,6 @@
       const yStep = getBrightnessTickStep(chartArea.height, uiScale);
       const lw = Math.max(1, uiScale);
 
-      // Precompute grid positions
       const xPositions = [];
       for (let minute = 0; minute <= 24 * 60; minute += tickStepMinutes) {
         const index = Math.min(labels.length - 1, minute);
@@ -334,7 +367,7 @@
         yPositions.push(Math.round(chartArea.bottom - (value / 100) * chartArea.height) + 0.5);
       }
 
-      // 1a. Gridlines inside chart area: invert against the gradient
+      // 1a. Gridlines inside chart area: 'difference' blend inverts against the gradient
       ctx.save();
       ctx.globalCompositeOperation = "difference";
       ctx.lineWidth = lw;
@@ -353,8 +386,7 @@
       }
       ctx.restore();
 
-      // 1b. Luminosity safety net for saturated blue/purple where difference fails.
-      // Pushes backdrop luminance toward ~70% gray, creating contrast through the green channel (highest perceptual weight, 10x blue sensitivity).
+      // 1b. 'luminosity' pass: fixes saturated blue/purple where 'difference' alone fails
       ctx.save();
       ctx.globalCompositeOperation = "luminosity";
       ctx.lineWidth = lw;
@@ -419,24 +451,13 @@
 
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(points[0].x, chartArea.bottom);
-      for (const point of points) {
-        ctx.lineTo(point.x, point.y);
-      }
-      ctx.lineTo(points[points.length - 1].x, chartArea.bottom);
-      ctx.closePath();
-      ctx.fillStyle = dataset.backgroundColor || "rgba(0,0,0,0.04)";
-      ctx.fill();
-      ctx.restore();
-
-      ctx.save();
-      ctx.beginPath();
       ctx.moveTo(points[0].x, points[0].y);
       for (let i = 1; i < points.length; i++) {
         ctx.lineTo(points[i].x, points[i].y);
       }
       const lineWidth = dataset.borderWidth || 2;
       const uiS = this._uiScale || getUiScale();
+      // White outline for readability on any gradient color
       const outlineWidth = lineWidth + Math.max(0.5, Math.round(1.5 * uiS));
       ctx.lineJoin = "round";
       ctx.lineCap = "round";
@@ -476,7 +497,7 @@
       }
 
       ctx.save();
-      ctx.translate(Math.round(12 * uiScale), Math.round(chartArea.top + chartArea.height / 2));
+      ctx.translate(Math.round((chartArea.left - 8 * uiScale) / 2) - Math.round(6 * uiScale), Math.round(chartArea.top + chartArea.height / 2));
       ctx.rotate(-Math.PI / 2);
       ctx.font = yTitleFont;
       ctx.fillStyle = yTitleColor;
@@ -489,14 +510,25 @@
       ctx.font = xFont;
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
+      const xTickFontSize = layout.xTickFontSize;
       for (let minute = 0; minute <= 24 * 60; minute += tickStepMinutes) {
         const index = Math.min(labels.length - 1, minute);
-        const label = labels[index] || minuteLabel(index);
+        const rawLabel = labels[index] || minuteLabel(index);
+        const label = formatTimeLabel(rawLabel);
         const x = Math.round(this.scales.x.getPixelForValue(index));
         ctx.save();
-        ctx.translate(x, Math.round(chartArea.bottom + 14 * uiScale));
+        ctx.translate(x, Math.round(chartArea.bottom + 18 * uiScale));
         ctx.rotate(-Math.PI / 4);
-        ctx.fillText(label, 0, 0);
+        if (isCompoundLabel(label)) {
+          ctx.fillText(label.time, 0, 0);
+          ctx.textAlign = "left";
+          ctx.font = fontString(Math.round(xTickFontSize * 0.7), "400", this._fontFamily);
+          ctx.fillText(label.suffix, 0, 0);
+          ctx.font = xFont;
+          ctx.textAlign = "right";
+        } else {
+          ctx.fillText(label, 0, 0);
+        }
         ctx.restore();
       }
       ctx.restore();
@@ -505,7 +537,7 @@
     _drawHoverPoint() {
       if (!this._hoverMarkerEl) return;
       if (!this._hoverPoint) {
-        this._hoverMarkerEl.style.display = "none";
+        if (!this._markerFadeTimer) this._hoverMarkerEl.style.display = "none";
         return;
       }
 
@@ -518,7 +550,6 @@
       const px = Math.round(canvasOffsetX + x);
       const py = Math.round(canvasOffsetY + y);
 
-      // Skip redundant updates when the marker hasn't moved
       const moved = px !== this._lastMarkerX || py !== this._lastMarkerY;
       if (moved) {
         this._lastMarkerX = px;
@@ -527,22 +558,30 @@
         this._markerHalf = size / 2;
         this._hoverMarkerEl.style.width = `${size}px`;
         this._hoverMarkerEl.style.height = `${size}px`;
-        this._hoverMarkerEl.style.display = "block";
-        // Position via transform only (no left/top = no layout shift / CLS)
-        this._hoverMarkerEl.style.transform = `translate(${px - this._markerHalf}px,${py - this._markerHalf}px) scale(1.18)`;
-        clearTimeout(this._markerScaleTimer);
-        this._markerScaleTimer = setTimeout(() => {
-          if (this._hoverMarkerEl) {
-            this._hoverMarkerEl.style.transform = `translate(${this._lastMarkerX - this._markerHalf}px,${this._lastMarkerY - this._markerHalf}px) scale(1)`;
-          }
-        }, 80);
+        this._hoverMarkerEl.style.transform = `translate(${px - this._markerHalf}px,${py - this._markerHalf}px)`;
+        if (this._hoverMarkerInner) {
+          this._hoverMarkerInner.style.transform = "scale(1.18)";
+          clearTimeout(this._markerScaleTimer);
+          this._markerScaleTimer = setTimeout(() => {
+            if (this._hoverMarkerInner) this._hoverMarkerInner.style.transform = "scale(1)";
+          }, 80);
+        }
       }
-      // Only update glow when color changes
+      clearTimeout(this._markerFadeTimer);
+      this._markerFadeTimer = null;
+      this._hoverMarkerEl.style.opacity = "1";
+      if (this._hoverMarkerInner) {
+        this._hoverMarkerInner.style.opacity = "1";
+        if (!moved) this._hoverMarkerInner.style.transform = "scale(1)";
+      }
+      this._hoverMarkerEl.style.display = "block";
       const glowColor = color || "#ffffff";
       if (glowColor !== this._lastGlowColor) {
         this._lastGlowColor = glowColor;
-        const ringW = Math.max(2, Math.round(2 * uiScale));
-        this._hoverMarkerEl.style.boxShadow = `0 0 0 ${ringW}px ${glowColor}, 0 0 ${Math.round(7 * uiScale)}px ${Math.round(2 * uiScale)}px ${glowColor}`;
+        const ringW = Math.max(1, Math.round(2 * uiScale) - 1);
+        const shadowVal = `0 0 0 ${ringW}px ${glowColor}, 0 0 ${Math.round(8 * uiScale)}px ${Math.round(3 * uiScale)}px ${glowColor}`;
+        if (this._hoverMarkerInner) this._hoverMarkerInner.style.boxShadow = shadowVal;
+        else this._hoverMarkerEl.style.boxShadow = shadowVal;
       }
       this._positionTooltip(px, py, parentRect.width, parentRect.height);
     }
@@ -552,6 +591,7 @@
       const el = document.createElement("div");
       el.className = "chart-tooltip";
       el.style.display = "none";
+      el.style.transform = "translate(-9999px,-9999px)";
 
       const row1 = document.createElement("div");
       row1.className = "chart-tooltip-row";
@@ -579,15 +619,18 @@
       this._ttBrightnessEl = brightnessSpan;
       this._ttSwatchEl = swatch;
       this._ttHexEl = hexSpan;
+      const uiS = this._uiScale || getUiScale();
+      if (typeof localStorage !== "undefined" && localStorage.getItem("clockFormat") === "12") {
+        el.style.minWidth = `${Math.round(115 * uiS)}px`;
+      }
       return el;
     }
 
     _updateTooltipContent(label, value, hex) {
-      if (!this._hoverTooltipEl) return;
+      if (!this._hoverTooltipEl) this._hoverTooltipEl = this._createHoverTooltipElement();
       const valText = Number.isFinite(value) ? `${value.toFixed(1)}%` : "--%";
-      const lbl = label || "--:--";
+      const lbl = isCompoundLabel(label) ? label.time + label.suffix : (label || "--:--");
       const h = hex || "";
-      // Skip DOM writes when nothing changed (avoids layout thrashing)
       if (lbl === this._ttLastLabel && valText === this._ttLastVal && h === this._ttLastHex) return;
       this._ttLastLabel = lbl;
       this._ttLastVal = valText;
@@ -611,7 +654,6 @@
       let top = markerY - offset;
 
       el.style.display = "block";
-      // Only measure tooltip size when content changed (avoids forced reflow)
       if (this._ttContentChanged || !this._ttCachedW) {
         const rect = el.getBoundingClientRect();
         this._ttCachedW = rect.width;
@@ -630,7 +672,6 @@
       if (top + tooltipH > containerH - 4) {
         top = containerH - tooltipH - 4;
       }
-      // Position via transform only (no left/top = no layout shift / CLS)
       el.style.transform = `translate(${Math.round(left)}px,${Math.round(top)}px)`;
     }
 
@@ -670,14 +711,11 @@
         const last = pts[pts.length - 1];
         const gap = Math.hypot(px - last.x, py - last.y);
         if (gap < 0.5) return;
-        // Track smoothed speed for speed-dependent max trail length.
         const timeSince = now - (this._trailLastPushTime || 0);
         const speed = timeSince > 0 ? gap / (timeSince / 1000) : 0;
         this._trailSpeed = this._trailSpeed
           ? this._trailSpeed * 0.7 + speed * 0.3
           : speed;
-        // Any re-entry after the cursor left starts a fresh trail.
-        // The old trail is preserved as a fading ghost snapshot.
         if (this._trailAbandoned) {
           this._snapshotTrailGhost();
           pts.length = 0;
@@ -696,76 +734,43 @@
       }
     }
 
-    _drawTrailFrame() {
-      this._trailRafId = null;
-      const c = this._trailCanvas;
-      const ctx = this._trailCtx;
-      if (!c || !ctx) return;
+    _advanceTrailPhysics(dt, now, seg) {
+      const pts = this._trailPoints;
+      const dtSec = dt / 1000;
+      const hovering = this._tooltipVisible;
 
-      this._resizeTrailCanvas();
-      const dpr = this._dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const w = c.width / dpr;
-      const h = c.height / dpr;
-
-      const now = performance.now();
-      const dt = Math.min(now - (this._lastTrailFrame || now), 100);
-      this._lastTrailFrame = now;
-
-      const uiScale = this._uiScale || getUiScale();
       const chartW = Math.max(1, this.chartArea && this.chartArea.width || 200);
       const chartH = Math.max(1, this.chartArea && this.chartArea.height || 100);
-      // Aspect-corrected distances: normalize both axes to equal weight
-      // so horizontal and vertical trails feel the same length.
       const gm = Math.sqrt(chartW * chartH);
-      const sx = gm / chartW;
-      const sy = gm / chartH;
-      const seg = (ax, ay, bx, by) => Math.hypot((bx - ax) * sx, (by - ay) * sy);
-      // Speed-dependent max length: shorter for medium, longer for fast.
       const speedRatio = Math.min(1, (this._trailSpeed || 0) / 400);
       const baseMaxLength = Math.max(50, Math.round(gm * (0.25 + speedRatio * 0.40)));
-      const thick = Math.max(0.5, 2 * uiScale - 1);
 
-      const pts = this._trailPoints;
-
-      // Compute total arc length (aspect-corrected) for soft-cap contraction
       let totalArc = 0;
       for (let i = pts.length - 1; i > 0; i--) {
         totalArc += seg(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
       }
 
-      // Turn detection: winding trails contract faster than straight ones.
       let windiness = 0;
       if (pts.length >= 2 && totalArc > 10) {
         const chord = seg(pts[0].x, pts[0].y, pts[pts.length - 1].x, pts[pts.length - 1].y);
         windiness = Math.max(0, 1 - chord / totalArc);
       }
 
-      // Contraction rates depend on hover state and recency of movement.
-      const dtSec = dt / 1000;
-      const hovering = this._tooltipVisible;
       const turnBoost = windiness * 60 * dtSec;
-      // Windiness temporarily shortens the max length so turns cause
-      // the trail to contract aggressively via the excess mechanism.
       const maxLength = baseMaxLength * (1 - windiness * 0.6);
       if (!this._trailHasFresh) {
-        // Decay speed when idle so maxLength shrinks with the trail.
         this._trailSpeed = (this._trailSpeed || 0) * Math.max(0, 1 - dtSec * 3);
         if (hovering) {
-          // Fast idle contraction matching the old trail's snappy feel.
           this._trailTailDist += (15 + totalArc * 2.0) * dtSec;
         } else {
-          // Cursor left: short grace, then fast decay.
           const sinceLeft = now - (this._trailLeftTime || now);
           const leftRamp = Math.min(1, Math.max(0, (sinceLeft - 100) / 200));
           this._trailTailDist += (20 + leftRamp * Math.max(120, totalArc * 3.0)) * dtSec;
         }
       } else {
-        // Active movement: contraction keeps medium-speed trails short.
         this._trailTailDist += totalArc * 1.0 * dtSec;
       }
-      // Excess contraction applies in ALL states (active, idle, left)
-      // so over-maxLength trails always get aggressive contraction.
+      // Excess contraction applies in ALL states
       if (totalArc > maxLength) {
         const excess = totalArc - maxLength;
         const ratio = Math.min(excess / maxLength, 1);
@@ -774,14 +779,12 @@
       this._trailTailDist += turnBoost;
       this._trailHasFresh = false;
 
-      // Global opacity: ramp to 1 when hovering, ramp to 0 when cursor left
       if (hovering) {
         this._trailFadeAlpha = Math.min(1, (this._trailFadeAlpha ?? 1) + dtSec * 8);
       } else {
         this._trailFadeAlpha = Math.max(0, (this._trailFadeAlpha ?? 1) - dtSec * 2.5);
       }
 
-      // Remove points fully consumed by contraction
       let consumedArc = 0;
       let consumed = 0;
       for (let i = 0; i < pts.length - 1; i++) {
@@ -798,49 +801,21 @@
         this._trailTailDist -= consumedArc;
       }
 
-      ctx.clearRect(0, 0, w, h);
+      return totalArc;
+    }
 
-      // Draw fading ghost trail from a previous hover session
-      let hasGhost = this._trailGhostAlpha > 0.01;
-      if (hasGhost && this._trailGhostCanvas) {
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.globalAlpha = this._trailGhostAlpha;
-        ctx.drawImage(this._trailGhostCanvas, 0, 0);
-        ctx.restore();
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        this._trailGhostAlpha -= dtSec * 2.5;
-        if (this._trailGhostAlpha <= 0.01) {
-          this._trailGhostAlpha = 0;
-          hasGhost = false;
-        }
-      }
+    _renderTrail(ctx, pts, offX, offY, seg, thick, uiScale) {
+      const firstSeg = seg(pts[0].x, pts[0].y, pts[1].x, pts[1].y);
 
-      if (pts.length < 2) {
-        this._trailTailDist = 0;
-        if (hasGhost || hovering) {
-          this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
-        }
-        return;
-      }
-
-      const canvasRect = this.canvas.getBoundingClientRect();
-      const parentRect = c.parentElement.getBoundingClientRect();
-      const offX = canvasRect.left - parentRect.left;
-      const offY = canvasRect.top - parentRect.top;
-
-      // Interpolate visual tail start within the first segment so
-      // contraction appears smooth instead of snapping to discrete points.
+      // Interpolate tail start within the first segment for smooth contraction
       let startX = pts[0].x;
       let startY = pts[0].y;
-      const firstSeg = seg(pts[0].x, pts[0].y, pts[1].x, pts[1].y);
       if (firstSeg > 0 && this._trailTailDist > 0) {
         const t = Math.min(this._trailTailDist / firstSeg, 1);
         startX = pts[0].x + (pts[1].x - pts[0].x) * t;
         startY = pts[0].y + (pts[1].y - pts[0].y) * t;
       }
 
-      // Cumulative arc distance from interpolated start (aspect-corrected)
       const arcDist = new Array(pts.length);
       arcDist[0] = 0;
       arcDist[1] = firstSeg > 0 ? firstSeg - Math.min(this._trailTailDist, firstSeg) : 0;
@@ -849,18 +824,12 @@
       }
       const trailLen = arcDist[pts.length - 1] || 1;
 
-      // Trail too short to render meaningfully: clear to avoid final-frame blip
       if (trailLen < 1) {
         pts.length = 0;
         this._trailTailDist = 0;
-        if (hasGhost) {
-          this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
-        }
-        return;
+        return false;
       }
 
-      // Fade entire trail as it gets very short so it dissolves to nothing
-      // before any rendering artifact can appear. Also apply global fade.
       const fadeOutPx = 20;
       const shortAlpha = trailLen < fadeOutPx ? (trailLen / fadeOutPx) ** 2 : 1;
       ctx.globalAlpha = shortAlpha * (this._trailFadeAlpha ?? 1);
@@ -880,8 +849,7 @@
       ctx.strokeStyle = "#ffffff";
       ctx.stroke();
 
-      // 2. Erase tail: per-segment fade based on arc distance so the fade
-      // follows the trail path exactly (no spatial gradient artifacts at bends).
+      // 2. Erase tail: per-segment fade along arc distance
       ctx.globalCompositeOperation = "destination-out";
       ctx.lineCap = "butt";
       for (let i = 0; i < pts.length - 1; i++) {
@@ -904,8 +872,7 @@
         ctx.stroke();
       }
 
-      // 3. Head fade: very subtle normally, strengthens as the trail
-      // approaches the hover marker diameter for smooth disappearance.
+      // 3. Head fade: strengthens as the trail nears the marker for smooth disappearance
       const markerDiam = Math.max(6, Math.round(14 * uiScale));
       const shortThresh = markerDiam * 2;
       const shortness = trailLen < shortThresh ? 1 - trailLen / shortThresh : 0;
@@ -938,6 +905,76 @@
 
       ctx.globalCompositeOperation = "source-over";
       ctx.globalAlpha = 1;
+      return true;
+    }
+
+    _drawTrailFrame() {
+      this._trailRafId = null;
+      const c = this._trailCanvas;
+      const ctx = this._trailCtx;
+      if (!c || !ctx) return;
+
+      this._resizeTrailCanvas();
+      const dpr = this._dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const w = c.width / dpr;
+      const h = c.height / dpr;
+
+      const now = performance.now();
+      const dt = Math.min(now - (this._lastTrailFrame || now), 100);
+      this._lastTrailFrame = now;
+
+      const uiScale = this._uiScale || getUiScale();
+      const chartW = Math.max(1, this.chartArea && this.chartArea.width || 200);
+      const chartH = Math.max(1, this.chartArea && this.chartArea.height || 100);
+      // Aspect-corrected distances so horizontal and vertical trails feel equal
+      const gm = Math.sqrt(chartW * chartH);
+      const sx = gm / chartW;
+      const sy = gm / chartH;
+      const seg = (ax, ay, bx, by) => Math.hypot((bx - ax) * sx, (by - ay) * sy);
+      const thick = Math.max(0.5, 2 * uiScale - 1);
+
+      const pts = this._trailPoints;
+      const hovering = this._tooltipVisible;
+
+      this._advanceTrailPhysics(dt, now, seg);
+
+      ctx.clearRect(0, 0, w, h);
+
+      let hasGhost = this._trailGhostAlpha > 0.01;
+      if (hasGhost && this._trailGhostCanvas) {
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalAlpha = this._trailGhostAlpha;
+        ctx.drawImage(this._trailGhostCanvas, 0, 0);
+        ctx.restore();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const dtSec = dt / 1000;
+        this._trailGhostAlpha -= dtSec * 2.5;
+        if (this._trailGhostAlpha <= 0.01) {
+          this._trailGhostAlpha = 0;
+          hasGhost = false;
+        }
+      }
+
+      if (pts.length < 2) {
+        this._trailTailDist = 0;
+        if (hasGhost || hovering) {
+          this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
+        }
+        return;
+      }
+
+      const canvasRect = this.canvas.getBoundingClientRect();
+      const parentRect = c.parentElement.getBoundingClientRect();
+      const offX = canvasRect.left - parentRect.left;
+      const offY = canvasRect.top - parentRect.top;
+
+      const rendered = this._renderTrail(ctx, pts, offX, offY, seg, thick, uiScale);
+      if (!rendered && hasGhost) {
+        this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
+        return;
+      }
 
       this._trailRafId = requestAnimationFrame(() => this._drawTrailFrame());
     }
@@ -973,38 +1010,94 @@
       }
     }
 
+    _resolveIndexToPoint(frac, labels, values, colorCache, dataset) {
+      if (!this.chartArea || !this.chartArea.width) return null;
+      const chartArea = this.chartArea;
+      const count = Math.min(labels.length || values.length, values.length || labels.length);
+      if (!count || count < 2) return null;
+      const width = Math.max(1, chartArea.width);
+      const height = Math.max(1, chartArea.height);
+      const denom = Math.max(1, count - 1);
+      const ii = Math.floor(frac);
+      const t = frac - ii;
+      const v1 = Number(values[clamp(ii, 0, count - 1)]);
+      const v2 = Number(values[clamp(ii + 1, 0, count - 1)]);
+      const x = chartArea.left + frac * (width / denom);
+      const y = !Number.isFinite(v1) ? chartArea.bottom
+        : !Number.isFinite(v2) ? chartArea.bottom - (clamp(v1, 0, 100) / 100) * height
+        : chartArea.bottom - ((clamp(v1, 0, 100) * (1 - t) + clamp(v2, 0, 100) * t) / 100) * height;
+      const roundedIndex = clamp(Math.round(frac), 0, count - 1);
+      const label = formatTimeLabel(labels[roundedIndex] || minuteLabel(roundedIndex));
+      const displayValue = clamp((chartArea.bottom - y) / height * 100, 0, 100);
+      const colorIdx = colorCache.length > 1
+        ? clamp(Math.round((frac / denom) * (colorCache.length - 1)), 0, colorCache.length - 1)
+        : roundedIndex;
+      const colorHex = colorCache.length ? normalizeHexColor(colorCache[colorIdx]) : null;
+      const fallback = normalizeHexColor(dataset && (dataset.borderColor || dataset.backgroundColor));
+      return { x, y, label, displayValue, color: colorHex || fallback, index: frac };
+    }
+
+    _updateLockedMarker() {
+      if (!this._markerLocked || this._lockedIndex == null) return;
+      if (!this.chartArea || !this.chartArea.width) return;
+      const labels = ensurePathArray(this.data && this.data.labels);
+      const dataset = this.data && this.data.datasets && this.data.datasets[0] ? this.data.datasets[0] : null;
+      const values = ensurePathArray(dataset && dataset.data);
+      const count = Math.min(labels.length || values.length, values.length || labels.length);
+      if (!count || count < 2) return;
+      const frac = clamp(this._lockedIndex, 0, count - 1);
+      const colorCache = ensurePathArray(this.colorHexCache);
+      const pt = this._resolveIndexToPoint(frac, labels, values, colorCache, dataset);
+      if (!pt) return;
+      this._hoverPoint = pt;
+      this._updateTooltipContent(pt.label, pt.displayValue, pt.color);
+      if (this._hoverTooltipEl) {
+        this._hoverTooltipEl.style.display = "block";
+        this._hoverTooltipEl.style.pointerEvents = "auto";
+        this._hoverTooltipEl.style.userSelect = "text";
+      }
+      this._drawHoverPoint();
+    }
+
     _createHoverMarkerElement() {
-      const el = document.createElement("div");
       const parent = this.canvas.parentElement || document.body;
       const s = this._uiScale || getUiScale();
-      el.className = "chart-hover-marker";
-      el.style.position = "absolute";
-      el.style.left = "0";
-      el.style.top = "0";
-      el.style.display = "none";
-      el.style.pointerEvents = "none";
-      el.style.zIndex = "29";
-      el.style.borderRadius = "999px";
-      el.style.background = `radial-gradient(circle, #ffffff ${1.5 * s}px, transparent ${2 * s}px)`;
-      el.style.border = "none";
-      el.style.boxSizing = "border-box";
-      el.style.backdropFilter = "invert(1) grayscale(1)";
-      el.style.webkitBackdropFilter = "invert(1) grayscale(1)";
-      el.style.transformOrigin = "center center";
-      el.style.transition = "transform 30ms ease-out, box-shadow 180ms ease-out";
-      parent.appendChild(el);
-      return el;
+
+      const outer = document.createElement("div");
+      outer.style.position = "absolute";
+      outer.style.left = "0";
+      outer.style.top = "0";
+      outer.style.display = "none";
+      outer.style.pointerEvents = "none";
+      outer.style.zIndex = "29";
+      outer.style.boxSizing = "border-box";
+      outer.style.transition = "transform 20ms ease-out, opacity 180ms ease-out";
+
+      const inner = document.createElement("div");
+      inner.style.position = "absolute";
+      inner.style.inset = "0";
+      inner.style.borderRadius = "999px";
+      inner.style.background = `radial-gradient(circle, #ffffff ${1.5 * s}px, transparent ${2 * s}px)`;
+      inner.style.backdropFilter = "invert(1) grayscale(1)";
+      inner.style.webkitBackdropFilter = "invert(1) grayscale(1)";
+      inner.style.transformOrigin = "center center";
+      inner.style.transition = "transform 200ms ease-out, box-shadow 180ms ease-out, opacity 180ms ease-out";
+
+      outer.appendChild(inner);
+      parent.appendChild(outer);
+      this._hoverMarkerInner = inner;
+      return outer;
     }
 
 
-    _spawnClickPulse(point) {
+    _spawnLockPulse(point) {
       if (!point) return;
 
       const parent = this.canvas.parentElement || document.body;
       const canvasRect = this.canvas.getBoundingClientRect();
       const parentRect = parent.getBoundingClientRect();
       const pulse = document.createElement("div");
-      pulse.className = "chart-copy-pulse";
+      pulse.className = "chart-lock-pulse";
       pulse.style.left = `${canvasRect.left - parentRect.left + point.x}px`;
       pulse.style.top = `${canvasRect.top - parentRect.top + point.y}px`;
       parent.appendChild(pulse);
@@ -1016,53 +1109,72 @@
       window.setTimeout(removePulse, 560);
     }
 
-    _copyTextToClipboard(text) {
-      if (!text) return false;
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-        navigator.clipboard.writeText(text).catch(() => {
-          this._copyTextToClipboardFallback(text);
-        });
-        return true;
+    _lockMarker() {
+      this._holdTimer = null;
+      if (!this._hoverPoint) return;
+      this._markerLocked = true;
+      this._lockedIndex = this._hoverPoint.index != null ? this._hoverPoint.index : null;
+      this._spawnLockPulse(this._hoverPoint);
+      if (this._hoverTooltipEl) {
+        this._hoverTooltipEl.style.userSelect = "text";
+        this._hoverTooltipEl.style.pointerEvents = "auto";
       }
-      return this._copyTextToClipboardFallback(text);
     }
 
-    _copyTextToClipboardFallback(text) {
-      if (!document.body) return false;
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.setAttribute("readonly", "true");
-      textarea.style.position = "fixed";
-      textarea.style.top = "-9999px";
-      textarea.style.left = "-9999px";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      textarea.setSelectionRange(0, textarea.value.length);
-      let copied = false;
-      try {
-        copied = document.execCommand("copy");
-      } catch {
-        copied = false;
+    _handlePointerDown(event) {
+      if (this._hoverTooltipEl && this._hoverTooltipEl.contains(event.target)) return;
+      if (this._markerLocked) {
+        this._markerLocked = false;
+        if (this._hoverTooltipEl) {
+          this._hoverTooltipEl.style.userSelect = "";
+          this._hoverTooltipEl.style.pointerEvents = "";
+        }
+        this._processPointerMove(event);
+        return;
       }
-      textarea.remove();
-      return copied;
+      if (event.pointerType === "touch") {
+        event.preventDefault();
+        this._processPointerMove(event);
+      }
+      this._holdStartX = event.clientX;
+      this._holdStartY = event.clientY;
+      clearTimeout(this._holdTimer);
+      this._holdTimer = setTimeout(() => this._lockMarker(), 1500);
+    }
+
+    _handlePointerUp(event) {
+      clearTimeout(this._holdTimer);
+      this._holdTimer = null;
+      if (!this._markerLocked && event && event.pointerType === "touch") {
+        this._hideTooltip();
+      }
     }
 
     _hideTooltip(shouldRedraw) {
+      if (this._markerLocked) return;
       this._tooltipVisible = false;
       this._hoverPoint = null;
       if (this._hoverMarkerEl) {
-        this._hoverMarkerEl.style.display = "none";
-        this._hoverMarkerEl.style.boxShadow = "none";
+        this._hoverMarkerEl.style.opacity = "0";
+        if (this._hoverMarkerInner) this._hoverMarkerInner.style.transform = "scale(0.6)";
+        clearTimeout(this._markerFadeTimer);
+        this._markerFadeTimer = setTimeout(() => {
+          if (this._hoverMarkerEl) this._hoverMarkerEl.style.display = "none";
+          if (this._hoverMarkerInner) this._hoverMarkerInner.style.transform = "scale(1)";
+          this._markerFadeTimer = null;
+        }, 200);
       }
+      if (this._pointerRafId) {
+        cancelAnimationFrame(this._pointerRafId);
+        this._pointerRafId = null;
+      }
+      this._pendingPointerEvent = null;
+      this._lastGlowColor = null;
       if (this._hoverTooltipEl) {
         this._hoverTooltipEl.style.display = "none";
       }
       this._trailAbandoned = true;
       this._trailLeftTime = performance.now();
-      // Let trail fade naturally via idle contraction instead of instant clear.
-      // Ensure animation loop keeps running for trail or ghost fade.
       const hasTrailOrGhost = this._trailPoints.length >= 2 || this._trailGhostAlpha > 0.01;
       if (hasTrailOrGhost && !this._trailRafId) {
         this._lastTrailFrame = performance.now();
@@ -1074,10 +1186,6 @@
     }
 
     _getHoverBounds() {
-      // Directional hover pad: the chart stays active slightly further outside
-      // its drawn area, with different generosity on each side. Click-to-copy
-      // uses the exact same bounds so there is no dead zone where hovering
-      // works but clicking does not.
       const s = this._uiScale || getUiScale();
       return {
         left: this.chartArea.left - Math.round(25 * s),
@@ -1093,12 +1201,21 @@
     }
 
     _handlePointerMove(event) {
-      // RAF-throttle: coalesce rapid pointer events into one update per frame
+      if (this._markerLocked) return;
+      if (this._holdTimer != null) {
+        const moveThreshold = event.pointerType === "touch" ? 15 : 6;
+        if (Math.hypot(event.clientX - this._holdStartX, event.clientY - this._holdStartY) > moveThreshold) {
+          clearTimeout(this._holdTimer);
+          this._holdTimer = null;
+        }
+      }
       this._pendingPointerEvent = event;
       if (!this._pointerRafId) {
         this._pointerRafId = requestAnimationFrame(() => {
           this._pointerRafId = null;
-          if (this._pendingPointerEvent) this._processPointerMove(this._pendingPointerEvent);
+          const ev = this._pendingPointerEvent;
+          this._pendingPointerEvent = null;
+          if (ev) this._processPointerMove(ev);
         });
       }
     }
@@ -1124,22 +1241,14 @@
         return;
       }
 
-      // Nearest-point-on-polyline: the cursor is projected onto each segment
-      // between consecutive data points and the closest projection wins. This
-      // gives true 2D hover feel (y coordinate matters) while eliminating the
-      // discontinuous jumps that a pure nearest-vertex search has at corners,
-      // because the marker slides continuously along each segment instead of
-      // snapping from one vertex to the next.
+      // Nearest-point-on-polyline: project cursor onto each segment for smooth 2D hover
       const chartArea = this.chartArea;
       const width = Math.max(1, chartArea.width);
       const height = Math.max(1, chartArea.height);
       const denom = Math.max(1, count - 1);
       const xStep = width / denom;
 
-      // Restrict the segment search to a window around the cursor's x. The
-      // polyline is monotonic in x with uniform spacing, so the relevant
-      // segments are those whose x-range brackets the cursor. A small pad
-      // covers edge cases without scanning all 1440 segments.
+      // Scan only segments near cursor x (monotonic polyline)
       const plotX = clamp((x - chartArea.left) / width, 0, 1);
       const centerIdx = plotX * denom;
       const scanPad = 8;
@@ -1166,12 +1275,7 @@
         const t = clamp(((x - px1) * segDx + (y - py1) * segDy) / segLenSq, 0, 1);
         const projX = px1 + t * segDx;
         const projY = py1 + t * segDy;
-        // Chart-normalized distance: dividing by the axis extent gives
-        // x and y equal influence in proportion to the chart's data range.
-        // On nearly-flat segments the y term is negligible (all projections
-        // share roughly the same y), but near steep ramps the cursor's
-        // vertical position pulls the marker toward the closest part of
-        // the curve. Segment projection still prevents corner jumps.
+        // Chart-normalized distance: equal x/y influence proportional to axis extent
         const ndx = (x - projX) / width;
         const ndy = (y - projY) / height;
         const dist = ndx * ndx + ndy * ndy;
@@ -1188,57 +1292,22 @@
         return;
       }
 
-      const roundedIndex = clamp(Math.round(bestFrac), 0, count - 1);
-      const label = labels[roundedIndex] || minuteLabel(roundedIndex);
-      // Display value derived from the marker's actual y position so the
-      // number always matches where the marker sits on the curve.
+      const colorCache = ensurePathArray(this.colorHexCache);
+      const pt = this._resolveIndexToPoint(bestFrac, labels, values, colorCache, dataset);
+      if (!pt) { this._hideTooltip(); return; }
       const displayValue = clamp((chartArea.bottom - bestY) / height * 100, 0, 100);
 
-      const colorCache = ensurePathArray(this.colorHexCache);
-      const colorIndex = colorCache.length > 1
-        ? clamp(Math.round((bestFrac / denom) * (colorCache.length - 1)), 0, colorCache.length - 1)
-        : roundedIndex;
-      const colorHex = colorCache.length ? normalizeHexColor(colorCache[colorIndex]) : null;
-      const datasetSwatchColor = normalizeHexColor(dataset && (dataset.borderColor || dataset.backgroundColor));
-      const hoveredHex = colorHex || datasetSwatchColor;
-
       this._tooltipVisible = true;
-      this._hoverPoint = {
-        x: bestX,
-        y: bestY,
-        label,
-        value: displayValue,
-        color: hoveredHex,
-      };
-      this._updateTooltipContent(label, displayValue, hoveredHex);
+      this._hoverPoint = { x: bestX, y: bestY, label: pt.label, value: displayValue, color: pt.color, index: bestFrac };
+      this._updateTooltipContent(pt.label, displayValue, pt.color);
 
       this._pushTrailPoint(bestX, bestY);
 
-      // Only update the hover marker and tooltip (DOM overlays), not the
-      // full chart. The full draw() redraws grid, gradient, dataset, and
-      // axes on every pointer event which is unnecessary and expensive.
       this._drawHoverPoint();
     }
 
-    _handleChartClick(event) {
-      if (!this.chartArea || !this._hoverPoint || !this._hoverPoint.color) return;
-
-      const canvasRect = this.canvas.getBoundingClientRect();
-      const x = event.clientX - canvasRect.left;
-      const y = event.clientY - canvasRect.top;
-      if (!this._isWithinHoverBounds(x, y)) return;
-
-      const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
-      const lastCopyAt = this._lastCopyAt || 0;
-      if (now - lastCopyAt < 400) return;
-      this._lastCopyAt = now;
-
-      this._copyTextToClipboard(this._hoverPoint.color);
-      this._spawnClickPulse(this._hoverPoint);
-    }
   }
 
   LiteChart.register = LiteChart.register.bind(LiteChart);
-
   window.Chart = LiteChart;
 })();

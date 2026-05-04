@@ -1,12 +1,12 @@
-// Minimal sunrise/sunset calculator ported from Python astral 3.2.
-// Only the functions needed for sunrise() and sunset() are included.
-// Input: latitude (°N positive), longitude (°E positive), Date object.
-// Output: { sunrise: "HH:MM", sunset: "HH:MM" } in local time, or null on failure.
+// Sunrise/sunset calculator ported from Python astral 3.2.
+// Input: lat (°N+), lon (°E+), Date. Output: { sunrise, sunset } as "HH:MM" or null.
 
 var SunCalc = (() => {
   var RAD = Math.PI / 180;
   var DEG = 180 / Math.PI;
   var SUN_APPARENT_RADIUS = 32 / (60 * 2);
+
+  // ── Astronomical primitives ──
 
   function julianDay(date) {
     var y = date.getUTCFullYear();
@@ -62,6 +62,7 @@ var SunCalc = (() => {
             - 0.5 * y * y * Math.sin(4 * l0) - 1.25 * e * e * Math.sin(2 * m)) * DEG * 4;
   }
 
+  // Atmospheric refraction correction for accurate sunrise/sunset
   function refractionAtZenith(zenith) {
     var elev = 90 - zenith;
     if (elev >= 85) return 0;
@@ -92,6 +93,7 @@ var SunCalc = (() => {
     var jd = julianDay(date);
     var adj = 0, timeUTC = 0;
     var jc, decl, ha, delta, offset;
+    // Two iterations: estimate then refine using the sun's position at the estimated time
     for (var i = 0; i < 2; i++) {
       jc = jdToJC(jd + adj);
       decl = sunDeclination(jc);
@@ -118,7 +120,10 @@ var SunCalc = (() => {
     return `${pad2(h)}:${pad2(min)}`;
   }
 
+  // ── Public API ──
+
   function calculate(lat, lon, date) {
+    // Zenith includes sun's radius: event fires when the edge touches the horizon
     var zenith = 90 + SUN_APPARENT_RADIUS;
     var tzOffsetMinutes = -date.getTimezoneOffset();
     var utcDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));

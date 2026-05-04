@@ -2,15 +2,14 @@
 
   const $ = id => document.getElementById(id);
 
+  // Intentional copy of getUiScale — each module reads the CSS var independently so they stay self-contained.
   function getUiScale() {
     const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
     const value = Number.parseFloat(raw);
     return Number.isFinite(value) && value > 0 ? value : 1;
   }
 
-  const UI_SCALE = getUiScale();
-  const scale = (value) => value * UI_SCALE;
-  document.documentElement.style.setProperty("--ui-scale", String(UI_SCALE));
+  const scale = (value) => value * getUiScale();
 
   // ── Theme management ──
 
@@ -33,8 +32,8 @@
     const theme = getEffectiveTheme();
     const themeIconSun = $("themeIconSun");
     const themeIconMoon = $("themeIconMoon");
-    themeIconSun.style.display = theme === "dark" ? "block" : "none";
-    themeIconMoon.style.display = theme === "light" ? "block" : "none";
+    themeIconSun.style.display = theme === "light" ? "block" : "none";
+    themeIconMoon.style.display = theme === "dark" ? "block" : "none";
   }
 
   function getThemeColors() {
@@ -66,6 +65,9 @@
     const clampedRatio = Math.max(MIN_ASPECT, Math.min(MAX_ASPECT, containerRatio));
     const target = clampedRatio + (IDEAL_ASPECT - clampedRatio) * 0.28;
     chart.options.aspectRatio = target;
+    chart.options.scales.x.ticks.font.size = scale(12);
+    chart.options.scales.yBrightness.ticks.font.size = scale(12);
+    chart.options.scales.yBrightness.title.font.size = scale(13);
     chart.resize();
   }
 
@@ -91,8 +93,14 @@
 
   // ── Slider <-> Number input pairing ──
 
-  const sunShiftDisplay = { toDisplay: v => (v / 10).toFixed(1), toSlider: v => Math.round(v * 10) };
+  // Integer slider ranges displayed as floats
+  const sunShiftDisplay = { toDisplay: v => (v / 20).toFixed(2), toSlider: v => Math.round(v * 20) };
   const luxStrDisplay   = { toDisplay: v => (v / 20).toFixed(2), toSlider: v => Math.round(v * 20) };
+
+  function updateSliderProgress(slider) {
+    const pct = ((slider.value - slider.min) / (slider.max - slider.min)) * 100;
+    slider.style.backgroundSize = pct + "% 100%";
+  }
 
   const sliderPairs = [
     { slider: "minBrightness", num: "minBrightnessNum" },
@@ -109,59 +117,35 @@
     const s = $(slider), n = $(num);
     const syncNumberFromSlider = () => {
       n.value = fmt ? fmt.toDisplay(+s.value) : s.value;
+      updateSliderProgress(s);
     };
 
     syncNumberFromSlider();
 
-    if (fmt) {
-      n.step = "any";
-      s.addEventListener("input", syncNumberFromSlider);
-      n.addEventListener("input", () => {
-        if (n.value === "") return;
+    if (fmt) n.step = "any";
+    s.addEventListener("input", syncNumberFromSlider);
+    n.addEventListener("input", () => {
+      if (n.value === "") return;
+      const raw = +n.value;
+      if (!Number.isFinite(raw)) return;
+      s.value = clamp(fmt ? fmt.toSlider(raw) : raw, +s.min, +s.max);
+      updateSliderProgress(s);
+    });
+    n.addEventListener("blur", () => {
+      if (n.value === "") {
+        s.value = +s.defaultValue;
+      } else {
         const raw = +n.value;
-        if (!Number.isFinite(raw)) return;
-        s.value = clamp(fmt.toSlider(raw), +s.min, +s.max);
-        n.value = fmt.toDisplay(+s.value);
-      });
-      n.addEventListener("blur", () => {
-        if (n.value === "") {
-          s.value = +s.defaultValue;
+        if (Number.isFinite(raw)) {
+          s.value = clamp(fmt ? fmt.toSlider(raw) : raw, +s.min, +s.max);
         } else {
-          const raw = +n.value;
-          if (Number.isFinite(raw)) {
-            s.value = clamp(fmt.toSlider(raw), +s.min, +s.max);
-          } else {
-            s.value = +s.defaultValue;
-          }
-        }
-        n.value = fmt.toDisplay(+s.value);
-        s.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-    } else {
-      s.addEventListener("input", syncNumberFromSlider);
-      n.addEventListener("input", () => {
-        if (n.value === "") return;
-        const raw = +n.value;
-        if (!Number.isFinite(raw)) return;
-        const v = clamp(raw, +s.min, +s.max);
-        s.value = v;
-        n.value = String(v);
-      });
-      n.addEventListener("blur", () => {
-        if (n.value === "") {
           s.value = +s.defaultValue;
-        } else {
-          const raw = +n.value;
-          if (Number.isFinite(raw)) {
-            s.value = clamp(raw, +s.min, +s.max);
-          } else {
-            s.value = +s.defaultValue;
-          }
         }
-        n.value = String(s.value);
-        s.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-    }
+      }
+      n.value = fmt ? fmt.toDisplay(+s.value) : String(s.value);
+      updateSliderProgress(s);
+      s.dispatchEvent(new Event("input", { bubbles: true }));
+    });
   });
 
   // ── DOM refs ──
@@ -200,6 +184,10 @@
     rgbEndColor: $("rgbEndColor"),
     rgbStartColorReset: $("rgbStartColorReset"),
     rgbEndColorReset: $("rgbEndColorReset"),
+    exportImportEnabled: $("exportImportEnabled"),
+    exportImportControls: $("exportImportControls"),
+    exportImportBox: $("exportImportBox"),
+    importBtn: $("importBtn"),
   };
 
   const timeInputs = [
@@ -215,6 +203,7 @@
     els.sunset,
   ];
 
+  // Track last valid value so we can restore on blur
   for (const input of timeInputs) {
     input.dataset.lastValidValue = input.value || input.defaultValue;
   }
@@ -245,6 +234,37 @@
     });
   }
 
+  // ── Custom time pickers ──
+
+  const timePickers = [];
+  let sunriseTp = null;
+  let sunsetTp = null;
+  if (typeof TimePicker !== "undefined") {
+    for (const input of timeInputs) {
+      const tp = new TimePicker(input);
+      timePickers.push(tp);
+      if (input === els.sunrise) sunriseTp = tp;
+      if (input === els.sunset) sunsetTp = tp;
+    }
+  }
+
+  function refreshTimePickers() {
+    for (const tp of timePickers) tp.syncFromInput();
+  }
+
+  // ── Time reset buttons ──
+
+  for (const btn of document.querySelectorAll(".time-reset-btn")) {
+    btn.addEventListener("click", () => {
+      const input = $(btn.dataset.for);
+      if (!input) return;
+      input.value = input.defaultValue;
+      input.dataset.lastValidValue = input.defaultValue;
+      refreshTimePickers();
+      render();
+    });
+  }
+
   function readParams() {
     return {
       curveType: els.curveType.value,
@@ -262,7 +282,7 @@
       colorDozeStart: safeTime(els.colorDozeStart),
       colorDozeEnd: safeTime(els.colorDozeEnd),
       sunShiftEnabled: els.sunShiftEnabled.checked,
-      sunShiftStrength: +els.sunShiftStrength.value / 10,
+      sunShiftStrength: +els.sunShiftStrength.value / 20,
       sunrise: safeTime(els.sunrise),
       sunset: safeTime(els.sunset),
       luxEnabled: els.luxEnabled.checked,
@@ -299,6 +319,7 @@
     els.sunrise.dataset.lastValidValue = times.sunrise;
     els.sunset.value = times.sunset;
     els.sunset.dataset.lastValidValue = times.sunset;
+    refreshTimePickers();
     render();
   }
 
@@ -353,35 +374,54 @@
   });
 
   function updateSunInputState() {
-    var locked = els.useLocation.checked;
+    const locked = els.useLocation.checked;
     els.sunrise.readOnly = locked;
     els.sunset.readOnly = locked;
-    els.sunrise.style.opacity = locked ? "0.6" : "";
-    els.sunset.style.opacity = locked ? "0.6" : "";
+    if (sunriseTp) sunriseTp.setEnabled(!locked);
+    if (sunsetTp) sunsetTp.setEnabled(!locked);
+    for (const btn of document.querySelectorAll(".time-reset-btn[data-for='sunrise'], .time-reset-btn[data-for='sunset']")) {
+      btn.disabled = locked;
+      btn.style.opacity = locked ? "0.5" : "";
+    }
   }
 
-  function updateVisibility() {
+  const sidebar = $("sidebar");
+
+  function updateVisibility(params) {
     els.colorTimingSection.style.display = els.syncCurves.checked ? "none" : "";
     els.sunShiftControls.style.display = els.sunShiftEnabled.checked ? "" : "none";
     els.luxControls.style.display = els.luxEnabled.checked ? "" : "none";
     els.rgbControls.style.display = els.useRgbColor.checked ? "" : "none";
+    els.exportImportControls.style.display = els.exportImportEnabled.checked ? "" : "none";
+    sidebar.classList.toggle("show-time-resets", els.exportImportEnabled.checked);
+    updateExportBox(params);
     updateSunInputState();
   }
 
   // ── Resizable sidebar ──
-
-  const sidebar = $("sidebar");
   const handle = $("resize-handle");
   let resizing = false;
+  let _resizeRafId = null;
+  let _resizePendingX = 0;
+  let _resizePendingY = 0;
+  let _resizeBaseMinW = 0;
+
+  const mobileBp = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--mobile-bp"), 10) || 600;
 
   function isMobile() {
-    return window.innerWidth < 768;
+    return window.innerWidth <= mobileBp;
+  }
+
+  function showMobileUI() {
+    const isTouchOnly = !window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+    document.documentElement.dataset.mobileUi = (isTouchOnly || isMobile()) ? "1" : "0";
   }
 
   function startResize(e) {
     if (resizing) return;
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
     resizing = true;
+    _resizeBaseMinW = parseInt(getComputedStyle(sidebar).minWidth, 10) || scale(250);
     handle.classList.add("active");
     document.body.style.cursor = isMobile() ? "row-resize" : "col-resize";
     document.body.style.userSelect = "none";
@@ -393,7 +433,14 @@
   }
 
   function handleResizeMouseMove(e) {
-    doResize(e.clientX, e.clientY);
+    _resizePendingX = e.clientX;
+    _resizePendingY = e.clientY;
+    if (!_resizeRafId) {
+      _resizeRafId = requestAnimationFrame(() => {
+        _resizeRafId = null;
+        doResize(_resizePendingX, _resizePendingY);
+      });
+    }
   }
 
   function handleResizeMouseUp() {
@@ -404,7 +451,14 @@
     if (!resizing) return;
     const t = e.touches[0];
     if (!t) return;
-    doResize(t.clientX, t.clientY);
+    _resizePendingX = t.clientX;
+    _resizePendingY = t.clientY;
+    if (!_resizeRafId) {
+      _resizeRafId = requestAnimationFrame(() => {
+        _resizeRafId = null;
+        doResize(_resizePendingX, _resizePendingY);
+      });
+    }
   }
 
   function handleResizeTouchEnd() {
@@ -418,8 +472,32 @@
       sidebar.style.height = `${h}px`;
       sidebar.style.maxHeight = `${h}px`;
     } else {
-      const w = Math.max(scale(200), Math.min(scale(500), clientX));
-      sidebar.style.width = `${w}px`;
+      const cssMinW = _resizeBaseMinW;
+      const padFull = scale(12);
+      const DEAD = Math.round(scale(100));
+      const SHRINK = Math.round(scale(40));
+      const w = Math.min(scale(500), clientX);
+
+      if (w >= cssMinW) {
+        // Normal zone: sidebar follows cursor, full padding, CSS min-width restored.
+        sidebar.style.width = `${w}px`;
+        sidebar.style.paddingLeft = sidebar.style.paddingRight = `${padFull}px`;
+        sidebar.style.minWidth = "";
+      } else if (w >= cssMinW - DEAD) {
+        // Dead zone: absorb drag without visual change.
+        sidebar.style.width = `${cssMinW}px`;
+        sidebar.style.paddingLeft = sidebar.style.paddingRight = `${padFull}px`;
+        sidebar.style.minWidth = "";
+      } else {
+        // Shrink zone (and hard stop beyond it).
+        const shrinkW = w + DEAD;
+        const activationW = cssMinW;
+        const t = Math.min(1, Math.max(0, (activationW - shrinkW) / SHRINK));
+        const actualW = Math.max(activationW - SHRINK, shrinkW);
+        sidebar.style.width = `${actualW}px`;
+        sidebar.style.paddingLeft = sidebar.style.paddingRight = `${Math.round(padFull * (1 - t))}px`;
+        sidebar.style.minWidth = "0";
+      }
     }
     scheduleChartResize();
   }
@@ -427,6 +505,7 @@
   function endResize() {
     if (!resizing) return;
     resizing = false;
+    if (_resizeRafId) { cancelAnimationFrame(_resizeRafId); _resizeRafId = null; }
     handle.classList.remove("active");
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
@@ -440,41 +519,60 @@
 
   handle.addEventListener("mousedown", startResize);
 
+  // passive:false required for preventDefault() in startResize
   handle.addEventListener("touchstart", (e) => {
     startResize(e);
   }, { passive: false });
 
-  // Clear stale inline styles when crossing the mobile/desktop breakpoint
+  const tabletBp = 800;
+  function isTablet() { return !isMobile() && window.innerWidth <= tabletBp; }
+
   let wasMobile = isMobile();
+  let wasTablet = isTablet();
+  let wasPortrait = window.innerHeight > window.innerWidth;
   window.addEventListener("resize", () => {
     const mobile = isMobile();
-    if (mobile !== wasMobile) {
+    const tablet = isTablet();
+    const portrait = window.innerHeight > window.innerWidth;
+    if (mobile !== wasMobile || tablet !== wasTablet) {
       sidebar.style.height = "";
       sidebar.style.maxHeight = "";
       sidebar.style.width = "";
+      sidebar.style.paddingLeft = "";
+      sidebar.style.paddingRight = "";
+      sidebar.style.minWidth = "";
       wasMobile = mobile;
+      wasTablet = tablet;
+    } else if (mobile && portrait !== wasPortrait && !portrait) {
+      sidebar.style.height = "";
+      sidebar.style.maxHeight = "";
     }
+    wasPortrait = portrait;
+    showMobileUI();
     scheduleChartResize();
   });
 
-  // ── Debounced render for color inputs ──
+  // ── Throttling / debounced render ──
 
-  let colorDebounceTimer = null;
+  let renderRafId = null;
 
   function renderDebounced() {
-    if (colorDebounceTimer) clearTimeout(colorDebounceTimer);
-    colorDebounceTimer = setTimeout(render, 150);
+    if (renderRafId) return;
+    renderRafId = requestAnimationFrame(() => {
+      renderRafId = null;
+      render();
+    });
   }
 
   // ── Color background plugin ──
-  // Fully opaque gradient behind chart content. Identical in both themes.
 
-  let colorHexCache = [];
+  let brightnessAlphaEnabled = false;
 
   const colorBgPlugin = {
     id: "colorBackground",
     beforeDraw(ch) {
-      if (!colorHexCache.length) return;
+      const colorHexCache = ch.colorHexCache;
+      if (!colorHexCache || !colorHexCache.length) return;
       const { ctx, chartArea } = ch;
       if (!chartArea) return;
 
@@ -483,18 +581,26 @@
       const areaH = bottom - top;
       const count = colorHexCache.length;
       const startX = Math.round(left);
+      const brightnessData = brightnessAlphaEnabled
+        ? (ch.data.datasets[0]?.data) || []
+        : [];
+      const bLen = brightnessData.length;
+
+      // When brightness-alpha is on, adjacent stripes have different alpha so the 1px overlap creates visible vertical lines. Use 1px stripes instead.
+      // When alpha is uniform (off), 2px with 1px overlap hides HiDPI sub-pixel seams.
+      const stripeW = bLen ? 5 : 2;
 
       ctx.save();
       for (let px = 0; px < areaW; px++) {
         const idx = Math.floor((px / areaW) * count);
+        if (bLen) {
+          const bIdx = Math.floor((px / areaW) * bLen);
+          ctx.globalAlpha = (brightnessData[Math.min(bIdx, bLen - 1)] || 0) / 100;
+        }
         ctx.fillStyle = colorHexCache[Math.min(idx, count - 1)];
-        // DO NOT CHANGE: stripe width MUST stay at 2, not 1.
-        // The 1px overlap hides sub-pixel seams between adjacent colors on
-        // HiDPI/fractional-scale displays. Using width=1 looks mathematically
-        // cleaner but produces visible vertical artifact lines across the
-        // gradient. This has been "fixed" and reverted multiple times.
-        ctx.fillRect(startX + px, top, 2, areaH);
+        ctx.fillRect(startX + px, top, stripeW, areaH);
       }
+      ctx.globalAlpha = 1;
       ctx.restore();
     },
   };
@@ -517,22 +623,74 @@
     }
   });
 
+  // ── Brightness-alpha gradient toggle ──
+
+  const brightnessAlphaToggle = $("brightnessAlphaToggle");
+  const brightnessAlphaIconOn = $("brightnessAlphaIconOn");
+  const brightnessAlphaIconOff = $("brightnessAlphaIconOff");
+  brightnessAlphaIconOn.style.display = "none";
+  brightnessAlphaIconOff.style.display = "block";
+
+  brightnessAlphaToggle.addEventListener("click", () => {
+    brightnessAlphaEnabled = !brightnessAlphaEnabled;
+    brightnessAlphaIconOn.style.display = brightnessAlphaEnabled ? "block" : "none";
+    brightnessAlphaIconOff.style.display = brightnessAlphaEnabled ? "none" : "block";
+    if (typeof chart !== "undefined") chart.update();
+  });
+
   // ── Now-line plugin ──
 
   let nowLineColors = null;
+  let sunLineData = null;
 
   const nowLinePlugin = {
     id: "nowLine",
     afterDraw(ch) {
       if (!overlayVisible) return;
+      const xScale = ch.scales.x;
+      const colors = nowLineColors || getThemeColors();
+      const c = ch.ctx;
+      const family = getUiFontFamily();
+      const fontSize = Math.round(scale(12));
+      const baseY = ch.scales.yBrightness.top - scale(7);
+
+      if (sunLineData && sunLineData.enabled) {
+        const rootStyle = getComputedStyle(document.documentElement);
+        const sunTimes = [
+          { timeStr: sunLineData.sunrise, color: rootStyle.getPropertyValue("--sun-rise-color").trim() || "#6aabf5", label: "Sunrise" },
+          { timeStr: sunLineData.sunset,  color: rootStyle.getPropertyValue("--sun-set-color").trim()  || "#e8920a", label: "Sunset"  },
+        ];
+        for (const { timeStr, color, label } of sunTimes) {
+          if (!timeStr || timeStr === "None") continue;
+          const [h, m] = timeStr.split(":").map(Number);
+          const sx = xScale.getPixelForValue(h * 60 + m);
+          if (sx < xScale.left || sx > xScale.right) continue;
+          c.save();
+          const lw = scale(1.5);
+          c.setLineDash([scale(6), scale(4)]);
+          c.beginPath();
+          c.moveTo(sx, ch.scales.yBrightness.top);
+          c.lineTo(sx, ch.scales.yBrightness.bottom);
+          c.strokeStyle = color;
+          c.lineWidth = lw;
+          c.stroke();
+          c.font = `${fontSize}px ${family}`;
+          c.textAlign = "center";
+          const halfW = c.measureText(label).width / 2;
+          const textX = Math.max(xScale.left + halfW, Math.min(xScale.right - halfW, sx));
+          c.setLineDash([]);
+          c.fillStyle = color;
+          c.fillText(label, textX, baseY);
+          c.restore();
+        }
+        return;
+      }
+
       const now = new Date();
       const minuteOfDay = now.getHours() * 60 + now.getMinutes();
-      const xScale = ch.scales.x;
       const x = xScale.getPixelForValue(minuteOfDay);
       if (x < xScale.left || x > xScale.right) return;
 
-      const colors = nowLineColors || getThemeColors();
-      const c = ch.ctx;
       c.save();
       c.beginPath();
       c.moveTo(x, ch.scales.yBrightness.top);
@@ -543,17 +701,45 @@
       c.stroke();
 
       c.fillStyle = colors.nowText;
-      c.font = `${scale(12)}px ${getUiFontFamily()}`;
       c.textAlign = "center";
-      const lbl = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      const fullLabel = `Now ${lbl}`;
-      const shortLabel = "Now";
-      const labelPad = scale(8);
-      const fullWidth = c.measureText(fullLabel).width;
-      const fitsFullLabel =
-        x - fullWidth / 2 >= xScale.left + labelPad &&
-        x + fullWidth / 2 <= xScale.right - labelPad;
-      c.fillText(fitsFullLabel ? fullLabel : shortLabel, x, ch.scales.yBrightness.top - scale(5));
+
+      // Format time label for 12h/24h
+      const hh = now.getHours();
+      const mm = now.getMinutes();
+      let timeLbl;
+      if (localStorage.getItem("clockFormat") === "12") {
+        const suffix = hh >= 12 ? " PM" : " AM";
+        timeLbl = `${hh % 12 || 12}:${String(mm).padStart(2, "0")}${suffix}`;
+      } else {
+        timeLbl = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+      }
+
+      // Single-line label, clamped horizontally to stay within chart bounds
+      if (localStorage.getItem("clockFormat") === "12") {
+        const spaceIdx = timeLbl.lastIndexOf(" ");
+        const timePart = spaceIdx > 0 ? timeLbl.slice(0, spaceIdx) : timeLbl;
+        const ampmPart = spaceIdx > 0 ? timeLbl.slice(spaceIdx) : "";
+        const baseText = `Now ${timePart}`;
+        const ampmFontSize = Math.round(fontSize * 0.75);
+        c.font = `${fontSize}px ${family}`;
+        const baseW = c.measureText(baseText).width;
+        c.font = `${ampmFontSize}px ${family}`;
+        const ampmW = c.measureText(ampmPart).width;
+        const totalW = baseW + ampmW;
+        const halfW = totalW / 2;
+        const textX = Math.max(xScale.left + halfW, Math.min(xScale.right - halfW, x));
+        c.textAlign = "left";
+        c.font = `${fontSize}px ${family}`;
+        c.fillText(baseText, textX - halfW, baseY);
+        c.font = `${ampmFontSize}px ${family}`;
+        c.fillText(ampmPart, textX - halfW + baseW, baseY);
+      } else {
+        const text = `Now ${timeLbl}`;
+        c.font = `${fontSize}px ${family}`;
+        const halfW = c.measureText(text).width / 2;
+        const textX = Math.max(xScale.left + halfW, Math.min(xScale.right - halfW, x));
+        c.fillText(text, textX, baseY);
+      }
       c.restore();
     },
   };
@@ -621,6 +807,33 @@
     updateChartTheme();
   });
 
+  // ── 12h/24h clock toggle ──
+
+  const clockToggle = $("clockToggle");
+  const clockLabel = $("clockLabel");
+
+  function updateClockLabel() {
+    clockLabel.textContent = localStorage.getItem("clockFormat") === "12" ? "12-hour clock" : "24-hour clock";
+  }
+  if (localStorage.getItem("clockFormat") === null) {
+    const use12h = new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hour12;
+    localStorage.setItem("clockFormat", use12h ? "12" : "24");
+    for (const tp of timePickers) tp.refresh();
+  }
+  updateClockLabel();
+
+  clockToggle.addEventListener("click", () => {
+    const current = localStorage.getItem("clockFormat");
+    localStorage.setItem("clockFormat", current === "12" ? "24" : "12");
+    updateClockLabel();
+    for (const tp of timePickers) tp.refresh();
+    if (chart._hoverTooltipEl && chart._hoverTooltipEl.parentNode) {
+      chart._hoverTooltipEl.parentNode.removeChild(chart._hoverTooltipEl);
+    }
+    chart._hoverTooltipEl = null;
+    chart.draw();
+  });
+
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     if (!localStorage.getItem("theme")) {
       setTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
@@ -629,7 +842,15 @@
     }
   });
 
-  // ── Dynamic aspect ratio: clamp between MIN and MAX to balance squareness with fill ──
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && chart._markerLocked) {
+      chart._markerLocked = false;
+      if (chart._hoverTooltipEl) chart._hoverTooltipEl.style.pointerEvents = "";
+      chart._hideTooltip();
+    }
+  });
+
+  // ── Dynamic aspect ratio ──
 
   const chartArea = $("chart-area");
   const ro = new ResizeObserver(() => {
@@ -673,15 +894,176 @@
     resetRgbColor(els.rgbEndColor, els.rgbEndColor.defaultValue);
   });
 
+  // ── Export / Import ──
+
+  function hexToRgbArray(hex) {
+    return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+  }
+
+  function rgbArrayToHex(arr) {
+    return "#" + arr.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
+  }
+
+  function timeToHA(hhmm) { return hhmm + ":00"; }
+  function timeFromHA(val) { return String(val).slice(0, 5); }
+
+  function arraysEqual(a, b) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+
+  // [HA key, JS element id, type, default (omitted from export if unchanged)]
+  const FIELD_MAP = [
+    ["curve_type",            "curveType",       "str",    "linear"],
+    ["min_brightness",        "minBrightness",   "int",    10],
+    ["max_brightness",        "maxBrightness",   "int",    100],
+    ["wake_start_time",       "wakeStart",       "time",   "07:00:00"],
+    ["wake_end_time",         "wakeEnd",         "time",   "09:00:00"],
+    ["doze_start_time",       "dozeStart",       "time",   "20:00:00"],
+    ["doze_end_time",         "dozeEnd",         "time",   "22:00:00"],
+    ["min_color_temp",        "minColorTemp",    "int",    2700],
+    ["max_color_temp",        "maxColorTemp",    "int",    5500],
+    ["sync_curves",           "syncCurves",      "bool",   true],
+    ["color_wake_start_time", "colorWakeStart",  "time",   "None"],
+    ["color_wake_end_time",   "colorWakeEnd",    "time",   "None"],
+    ["color_doze_start_time", "colorDozeStart",  "time",   "None"],
+    ["color_doze_end_time",   "colorDozeEnd",    "time",   "None"],
+    ["sun_shift",             "sunShiftEnabled",  "bool",  false],
+    ["sun_shift_strength",    "sunShiftStrength","sunFloat", 0.5],
+    ["lux_strength",          "luxStrength",     "luxFloat", 0.5],
+    ["use_rgb_color",         "useRgbColor",     "bool",   false],
+    ["rgb_start_color",       "rgbStartColor",   "rgb",    [255, 128, 0]],
+    ["rgb_end_color",         "rgbEndColor",     "rgb",    [189, 223, 255]],
+  ];
+
+  function readHAValue(jsKey, kind, params) {
+    const v = params[jsKey];
+    if (kind === "time") return timeToHA(v);
+    if (kind === "int") return Math.round(v);
+    if (kind === "sunFloat" || kind === "luxFloat") return v;
+    if (kind === "bool") return v;
+    if (kind === "rgb") return hexToRgbArray(v);
+    return v;
+  }
+
+  function valuesEqual(a, b, kind) {
+    if (kind === "rgb") return arraysEqual(a, b);
+    return a === b;
+  }
+
+  const COLOR_TIME_KEYS = new Set([
+    "color_wake_start_time", "color_wake_end_time",
+    "color_doze_start_time", "color_doze_end_time",
+  ]);
+
+  function buildExportJson(params) {
+    const p = params || readParams();
+    const obj = {};
+    for (const [haKey, jsKey, kind, def] of FIELD_MAP) {
+      if (p.syncCurves && COLOR_TIME_KEYS.has(haKey)) continue;
+      const val = readHAValue(jsKey, kind, p);
+      if (!valuesEqual(val, def, kind)) obj[haKey] = val;
+    }
+    const raw = JSON.stringify(obj, null, 2);
+    return raw.replace(/\[\s+([\d,\s]+?)\s+\]/g, (_, inner) => {
+      return "[" + inner.replace(/\s+/g, " ") + "]";
+    });
+  }
+
+  function updateExportBox(params) {
+    if (!els.exportImportEnabled.checked) return;
+    if (document.activeElement === els.exportImportBox) return;
+    els.exportImportBox.value = buildExportJson(params);
+  }
+
+  function applyImport(text) {
+    const trimmed = text.trim();
+    if (!trimmed) return 0;
+    let obj;
+    try { obj = JSON.parse(trimmed); } catch (_) { return -1; }
+    if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return -1;
+    const lookup = new Map(FIELD_MAP.map(([ha, js, kind]) => [ha, { js, kind }]));
+    let applied = 0;
+    for (const [key, val] of Object.entries(obj)) {
+      const entry = lookup.get(key);
+      if (!entry) continue;
+      const el = els[entry.js];
+      if (!el) continue;
+      if (entry.kind === "time") {
+        if (typeof val !== "string" || val === "None") continue;
+        el.value = timeFromHA(val);
+        el.dataset.lastValidValue = el.value;
+      } else if (val === null) {
+        if (entry.kind === "bool") el.checked = el.defaultChecked;
+        else el.value = el.defaultValue;
+      } else if (entry.kind === "bool") {
+        el.checked = !!val;
+      } else if (entry.kind === "rgb") {
+        if (Array.isArray(val) && val.length >= 3) el.value = enforceFullBrightness(rgbArrayToHex(val));
+        else continue;
+      } else if (entry.kind === "sunFloat") {
+        const n = Number(val);
+        if (Number.isFinite(n)) el.value = Math.round(n * 20);
+        else continue;
+      } else if (entry.kind === "luxFloat") {
+        const n = Number(val);
+        if (Number.isFinite(n)) el.value = Math.round(n * 20);
+        else continue;
+      } else if (entry.kind === "int") {
+        const n = Number(val);
+        if (Number.isFinite(n)) el.value = n;
+        else continue;
+      } else if (entry.kind === "str") {
+        el.value = String(val);
+      }
+      applied++;
+    }
+    if (applied > 0) {
+      sliderPairs.forEach(({ slider, num, fmt }) => {
+        const s = $(slider), n = $(num);
+        n.value = fmt ? fmt.toDisplay(+s.value) : s.value;
+        updateSliderProgress(s);
+      });
+      refreshTimePickers();
+      render();
+    }
+    return applied;
+  }
+
+  els.exportImportEnabled.addEventListener("change", () => {
+    if (els.exportImportEnabled.checked) updateExportBox();
+  });
+
+  function flashImportBtn(text) {
+    els.importBtn.disabled = true;
+    els.importBtn.textContent = text;
+    setTimeout(() => {
+      els.importBtn.textContent = "Import";
+      els.importBtn.disabled = false;
+    }, 3000);
+  }
+
+  els.importBtn.addEventListener("click", () => {
+    if (els.importBtn.disabled) return;
+    const count = applyImport(els.exportImportBox.value);
+    if (count > 0) {
+      flashImportBtn(`Imported ${count} setting${count > 1 ? "s" : ""}`);
+      updateExportBox();
+    } else if (count === -1) {
+      flashImportBtn("Invalid JSON");
+    } else {
+      flashImportBtn("Nothing to import");
+    }
+  });
+
   // ── Render ──
 
   function render() {
-    updateVisibility();
-
     const params = readParams();
+    updateVisibility(params);
+    sunLineData = { enabled: params.sunShiftEnabled, sunrise: params.sunrise, sunset: params.sunset };
+
     const data = generateCurveData(params);
 
-    colorHexCache = data.colorHex;
     chart.colorHexCache = data.colorHex;
 
     chart.data.labels = data.labels;
@@ -691,17 +1073,23 @@
 
   const sidebarEl = $("sidebar");
   sidebarEl.addEventListener("input", (e) => {
-    if (e.target.type === "color") {
+    if (e.target === els.exportImportBox) return;
+    if (e.target.type === "range") {
+      updateSliderProgress(e.target);
+      renderDebounced();
+    } else if (e.target.type === "color") {
       renderDebounced();
     } else {
       render();
     }
   });
   sidebarEl.addEventListener("change", (e) => {
+    if (e.target === els.exportImportBox) return;
     if (e.target.type === "color") enforceColorPickers();
     render();
   });
 
+  showMobileUI();
   render();
   requestAnimationFrame(() => {
     $("chartCanvasShell").classList.add("chart-ready");
