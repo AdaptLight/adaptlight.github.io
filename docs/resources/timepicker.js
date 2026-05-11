@@ -61,7 +61,7 @@
     return deg;
   }
 
-  // Intentional copy of getUiScale from app.js/chart-lite.js — each module reads the CSS var independently so they stay self-contained.
+  // Intentional copy of getUiScale from app.js/chart-lite.js — each module reads the CSS var independently so they stay self-contained
   function getUiScale() {
     const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
     const value = Number.parseFloat(raw);

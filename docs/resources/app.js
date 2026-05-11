@@ -2,7 +2,7 @@
 
   const $ = id => document.getElementById(id);
 
-  // Intentional copy of getUiScale — each module reads the CSS var independently so they stay self-contained.
+  // Intentional copy of getUiScale — each module reads the CSS var independently so they stay self-contained
   function getUiScale() {
     const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
     const value = Number.parseFloat(raw);
@@ -55,20 +55,31 @@
 
   applyThemeIcons();
 
+  const uiFontFamily = getUiFontFamily();
+
   // ── Sidebar hide/show ──
 
   function recalculateChartSize() {
+    chartArea.style.maxHeight = ""; // reset so flex reports true available height
     const w = chartArea.clientWidth;
     const h = chartArea.clientHeight;
     if (w <= 0 || h <= 0) return;
     const containerRatio = w / h;
     const clampedRatio = Math.max(MIN_ASPECT, Math.min(MAX_ASPECT, containerRatio));
-    const target = clampedRatio + (IDEAL_ASPECT - clampedRatio) * 0.28;
+    const target = clampedRatio + (IDEAL_ASPECT - clampedRatio) * ASPECT_BLEND;
     chart.options.aspectRatio = target;
     chart.options.scales.x.ticks.font.size = scale(12);
     chart.options.scales.yBrightness.ticks.font.size = scale(12);
     chart.options.scales.yBrightness.title.font.size = scale(13);
     chart.resize();
+    if (isMobile() && chart.canvas) {
+      const canvasH = chart.canvas.offsetHeight;
+      if (canvasH > 0) {
+        const cs = getComputedStyle(chartArea);
+        const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+        chartArea.style.maxHeight = Math.ceil(canvasH + pad) + "px";
+      }
+    }
   }
 
   let chartResizeTimer = null;
@@ -325,9 +336,12 @@
 
   function fetchLocation() {
     setLocationStatus("Locating...");
-    fetch("https://ipinfo.io/json")
+    const ctl = new AbortController();
+    const timeoutId = setTimeout(() => ctl.abort(), 8000);
+    fetch("https://ipinfo.io/json", { signal: ctl.signal })
       .then(r => r.json())
       .then(data => {
+        clearTimeout(timeoutId);
         const loc = data.loc ? data.loc.split(",") : null;
         if (loc && loc.length === 2) {
           geoLocation = { lat: +loc[0], lon: +loc[1] };
@@ -339,7 +353,13 @@
           setLocationStatus("Could not determine location");
         }
       })
-      .catch(() => { setLocationStatus("Location lookup failed"); });
+      .catch(err => {
+        if (err.name === "AbortError") {
+          setLocationStatus("Location lookup timed out");
+        } else {
+          setLocationStatus("Location lookup failed");
+        }
+      });
   }
 
   (function restoreLocation() {
@@ -404,7 +424,13 @@
   let _resizeRafId = null;
   let _resizePendingX = 0;
   let _resizePendingY = 0;
-  let _resizeBaseMinW = 0;
+  let _resizeStartX = 0;
+  let _resizeStartW = 0;
+  let _resizeShrunkState = false;
+  let _resizeShrinkNormalW = 0;
+  let _resizeShrinkStopW = 0;
+  let _resizePadFull = 0;
+  let _resizeDead = 0;
 
   const mobileBp = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--mobile-bp"), 10) || 600;
 
@@ -421,7 +447,13 @@
     if (resizing) return;
     if (e.cancelable) e.preventDefault();
     resizing = true;
-    _resizeBaseMinW = parseInt(getComputedStyle(sidebar).minWidth, 10) || scale(250);
+    const startEv = e.touches ? e.touches[0] : e;
+    _resizeStartX = startEv.clientX;
+    _resizeStartW = parseFloat(sidebar.style.width) || 0;
+    _resizeShrinkNormalW = Math.round(scale(isTablet() ? 230 : 240));
+    _resizeShrinkStopW   = Math.round(scale(isTablet() ? 200 : 210));
+    _resizePadFull = scale(12);
+    _resizeDead  = Math.round(scale(120));
     handle.classList.add("active");
     document.body.style.cursor = isMobile() ? "row-resize" : "col-resize";
     document.body.style.userSelect = "none";
@@ -472,31 +504,48 @@
       sidebar.style.height = `${h}px`;
       sidebar.style.maxHeight = `${h}px`;
     } else {
-      const cssMinW = _resizeBaseMinW;
-      const padFull = scale(12);
-      const DEAD = Math.round(scale(100));
-      const SHRINK = Math.round(scale(40));
+      // Shrink breakpoint values are captured once in startResize (not recalculated per RAF frame).
+      //   SHRINK_NORMAL_W — width at which the dead zone / shrink zone activate
+      //   SHRINK_STOP_W   — fully-shrunk hard-stop (minimum collapsed width)
+      const SHRINK_NORMAL_W = _resizeShrinkNormalW;
+      const SHRINK_STOP_W   = _resizeShrinkStopW;
+      const padFull = _resizePadFull;
+      const DEAD  = _resizeDead;
+      const SHRINK = SHRINK_NORMAL_W - SHRINK_STOP_W;
       const w = Math.min(scale(500), clientX);
+      const minWStr = SHRINK_NORMAL_W + "px"; // explicit value — never falls back to CSS
 
-      if (w >= cssMinW) {
-        // Normal zone: sidebar follows cursor, full padding, CSS min-width restored.
+      // _resizeShrunkState is set only when the sidebar actually reaches the hard stop,
+      // not on every minor incursion into the shrink zone, so the dead-zone resistance is preserved for partial shrinks and quick repeated drags.
+      if (w >= SHRINK_NORMAL_W) {
+        // Normal zone
         sidebar.style.width = `${w}px`;
         sidebar.style.paddingLeft = sidebar.style.paddingRight = `${padFull}px`;
-        sidebar.style.minWidth = "";
-      } else if (w >= cssMinW - DEAD) {
-        // Dead zone: absorb drag without visual change.
-        sidebar.style.width = `${cssMinW}px`;
+        sidebar.style.minWidth = minWStr;
+        _resizeShrunkState = false;
+      } else if (_resizeShrunkState) {
+        // Delta path: sidebar tracks cursor directly from its position at drag start.
+        // Only active when the hard stop was previously reached — keeps dead-zone resistance intact for partial or quick-drag shrunk states.
+        const delta = clientX - _resizeStartX;
+        const targetW = Math.max(SHRINK_STOP_W, Math.min(SHRINK_NORMAL_W, _resizeStartW + delta));
+        const t = Math.min(1, Math.max(0, (SHRINK_NORMAL_W - targetW) / SHRINK));
+        sidebar.style.width = `${Math.round(targetW)}px`;
+        sidebar.style.paddingLeft = sidebar.style.paddingRight = `${Math.round(padFull * (1 - t))}px`;
+        sidebar.style.minWidth = targetW < SHRINK_NORMAL_W ? "0" : minWStr;
+      } else if (w >= SHRINK_NORMAL_W - DEAD) {
+        // Dead zone: absorb drag without visual change (from normal side)
+        sidebar.style.width = `${SHRINK_NORMAL_W}px`;
         sidebar.style.paddingLeft = sidebar.style.paddingRight = `${padFull}px`;
-        sidebar.style.minWidth = "";
+        sidebar.style.minWidth = minWStr;
       } else {
-        // Shrink zone (and hard stop beyond it).
+        // Shrink zone (and hard stop beyond it)
         const shrinkW = w + DEAD;
-        const activationW = cssMinW;
-        const t = Math.min(1, Math.max(0, (activationW - shrinkW) / SHRINK));
-        const actualW = Math.max(activationW - SHRINK, shrinkW);
+        const t = Math.min(1, Math.max(0, (SHRINK_NORMAL_W - shrinkW) / SHRINK));
+        const actualW = Math.max(SHRINK_STOP_W, shrinkW);
         sidebar.style.width = `${actualW}px`;
         sidebar.style.paddingLeft = sidebar.style.paddingRight = `${Math.round(padFull * (1 - t))}px`;
         sidebar.style.minWidth = "0";
+        if (actualW <= SHRINK_STOP_W) _resizeShrunkState = true;
       }
     }
     scheduleChartResize();
@@ -524,8 +573,13 @@
     startResize(e);
   }, { passive: false });
 
-  const tabletBp = 800;
+  const tabletBp = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--tablet-bp"), 10) || 800;
   function isTablet() { return !isMobile() && window.innerWidth <= tabletBp; }
+
+  // Initialize sidebar min-width and width from JS — single source of truth (no CSS min-width rule).
+  // startResize() caches the same breakpoint values for use by doResize.
+  sidebar.style.minWidth = Math.round(scale(isTablet() ? 230 : 240)) + "px";
+  sidebar.style.width = sidebar.offsetWidth + "px"; // prime inline so first drag has no jump
 
   let wasMobile = isMobile();
   let wasTablet = isTablet();
@@ -540,7 +594,9 @@
       sidebar.style.width = "";
       sidebar.style.paddingLeft = "";
       sidebar.style.paddingRight = "";
-      sidebar.style.minWidth = "";
+      sidebar.style.minWidth = Math.round(scale(tablet ? 230 : 240)) + "px";
+      sidebar.style.width = sidebar.offsetWidth + "px"; // re-prime after reset
+      _resizeShrunkState = false;
       wasMobile = mobile;
       wasTablet = tablet;
     } else if (mobile && portrait !== wasPortrait && !portrait) {
@@ -552,11 +608,11 @@
     scheduleChartResize();
   });
 
-  // ── Throttling / debounced render ──
+  // ── Throttling / throttled render ──
 
   let renderRafId = null;
 
-  function renderDebounced() {
+  function renderThrottled() {
     if (renderRafId) return;
     renderRafId = requestAnimationFrame(() => {
       renderRafId = null;
@@ -578,7 +634,8 @@
 
       const { left, right, top, bottom } = chartArea;
       const areaW = Math.round(right - left);
-      const areaH = bottom - top;
+      const areaH = Math.round(bottom - top);
+      if (areaW <= 0 || areaH <= 0) return;
       const count = colorHexCache.length;
       const startX = Math.round(left);
       const brightnessData = brightnessAlphaEnabled
@@ -586,21 +643,30 @@
         : [];
       const bLen = brightnessData.length;
 
-      // When brightness-alpha is on, adjacent stripes have different alpha so the 1px overlap creates visible vertical lines. Use 1px stripes instead.
-      // When alpha is uniform (off), 2px with 1px overlap hides HiDPI sub-pixel seams.
-      const stripeW = bLen ? 5 : 2;
+      // Build a 1-pixel-tall RGBA row (one column per pixel), then scale to chart height with drawImage.
+      // Single putImageData + drawImage replaces per-pixel fillRect calls.
+      const buf = new Uint8ClampedArray(areaW * 4);
+      for (let px = 0; px < areaW; px++) {
+        const hex = colorHexCache[Math.min(Math.floor((px / areaW) * count), count - 1)];
+        buf[px * 4]     = parseInt(hex.slice(1, 3), 16);
+        buf[px * 4 + 1] = parseInt(hex.slice(3, 5), 16);
+        buf[px * 4 + 2] = parseInt(hex.slice(5, 7), 16);
+        buf[px * 4 + 3] = bLen
+          ? Math.round((brightnessData[Math.min(Math.floor((px / areaW) * bLen), bLen - 1)] || 0) / 100 * 255)
+          : 255;
+      }
+
+      if (!colorBgPlugin._tmpCanvas) {
+        colorBgPlugin._tmpCanvas = document.createElement("canvas");
+        colorBgPlugin._tmpCanvas.height = 1;
+        colorBgPlugin._tmpCtx = colorBgPlugin._tmpCanvas.getContext("2d");
+      }
+      const tmp = colorBgPlugin._tmpCanvas;
+      if (tmp.width !== areaW) tmp.width = areaW;
+      colorBgPlugin._tmpCtx.putImageData(new ImageData(buf, areaW, 1), 0, 0);
 
       ctx.save();
-      for (let px = 0; px < areaW; px++) {
-        const idx = Math.floor((px / areaW) * count);
-        if (bLen) {
-          const bIdx = Math.floor((px / areaW) * bLen);
-          ctx.globalAlpha = (brightnessData[Math.min(bIdx, bLen - 1)] || 0) / 100;
-        }
-        ctx.fillStyle = colorHexCache[Math.min(idx, count - 1)];
-        ctx.fillRect(startX + px, top, stripeW, areaH);
-      }
-      ctx.globalAlpha = 1;
+      ctx.drawImage(tmp, 0, 0, areaW, 1, startX, Math.round(top), areaW, areaH);
       ctx.restore();
     },
   };
@@ -650,7 +716,7 @@
       const xScale = ch.scales.x;
       const colors = nowLineColors || getThemeColors();
       const c = ch.ctx;
-      const family = getUiFontFamily();
+      const family = uiFontFamily;
       const fontSize = Math.round(scale(12));
       const baseY = ch.scales.yBrightness.top - scale(7);
 
@@ -704,10 +770,11 @@
       c.textAlign = "center";
 
       // Format time label for 12h/24h
+      const clockFmt = localStorage.getItem("clockFormat");
       const hh = now.getHours();
       const mm = now.getMinutes();
       let timeLbl;
-      if (localStorage.getItem("clockFormat") === "12") {
+      if (clockFmt === "12") {
         const suffix = hh >= 12 ? " PM" : " AM";
         timeLbl = `${hh % 12 || 12}:${String(mm).padStart(2, "0")}${suffix}`;
       } else {
@@ -715,7 +782,7 @@
       }
 
       // Single-line label, clamped horizontally to stay within chart bounds
-      if (localStorage.getItem("clockFormat") === "12") {
+      if (clockFmt === "12") {
         const spaceIdx = timeLbl.lastIndexOf(" ");
         const timePart = spaceIdx > 0 ? timeLbl.slice(0, spaceIdx) : timeLbl;
         const ampmPart = spaceIdx > 0 ? timeLbl.slice(spaceIdx) : "";
@@ -751,6 +818,7 @@
   const IDEAL_ASPECT = 2.5;
   const MIN_ASPECT = 1.0;
   const MAX_ASPECT = 3.0;
+  const ASPECT_BLEND = 0.28;
 
   const initColors = getThemeColors();
   const ctx = $("curveChart").getContext("2d");
@@ -821,10 +889,13 @@
     for (const tp of timePickers) tp.refresh();
   }
   updateClockLabel();
+  Chart.setClockFormat(localStorage.getItem("clockFormat"));
 
   clockToggle.addEventListener("click", () => {
     const current = localStorage.getItem("clockFormat");
-    localStorage.setItem("clockFormat", current === "12" ? "24" : "12");
+    const next = current === "12" ? "24" : "12";
+    localStorage.setItem("clockFormat", next);
+    Chart.setClockFormat(next);
     updateClockLabel();
     for (const tp of timePickers) tp.refresh();
     if (chart._hoverTooltipEl && chart._hoverTooltipEl.parentNode) {
@@ -896,10 +967,6 @@
 
   // ── Export / Import ──
 
-  function hexToRgbArray(hex) {
-    return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
-  }
-
   function rgbArrayToHex(arr) {
     return "#" + arr.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
   }
@@ -941,7 +1008,7 @@
     if (kind === "int") return Math.round(v);
     if (kind === "sunFloat" || kind === "luxFloat") return v;
     if (kind === "bool") return v;
-    if (kind === "rgb") return hexToRgbArray(v);
+    if (kind === "rgb") return hexToComponents(v);
     return v;
   }
 
@@ -990,30 +1057,35 @@
       if (!el) continue;
       if (entry.kind === "time") {
         if (typeof val !== "string" || val === "None") continue;
-        el.value = timeFromHA(val);
-        el.dataset.lastValidValue = el.value;
+        const t = timeFromHA(val);
+        if (!isValidTimeValue(t)) continue;
+        const hh = parseInt(t.slice(0, 2), 10);
+        const mm = parseInt(t.slice(3, 5), 10);
+        if (hh < 0 || hh > 23 || mm < 0 || mm > 59) continue;
+        el.value = t;
+        el.dataset.lastValidValue = t;
       } else if (val === null) {
         if (entry.kind === "bool") el.checked = el.defaultChecked;
         else el.value = el.defaultValue;
       } else if (entry.kind === "bool") {
         el.checked = !!val;
       } else if (entry.kind === "rgb") {
-        if (Array.isArray(val) && val.length >= 3) el.value = enforceFullBrightness(rgbArrayToHex(val));
-        else continue;
-      } else if (entry.kind === "sunFloat") {
+        if (!Array.isArray(val) || val.length < 3) continue;
+        const clamped = val.slice(0, 3).map(c => Math.max(0, Math.min(255, Math.round(Number(c) || 0))));
+        el.value = enforceFullBrightness(rgbArrayToHex(clamped));
+      } else if (entry.kind === "sunFloat" || entry.kind === "luxFloat") {
         const n = Number(val);
-        if (Number.isFinite(n)) el.value = Math.round(n * 20);
-        else continue;
-      } else if (entry.kind === "luxFloat") {
-        const n = Number(val);
-        if (Number.isFinite(n)) el.value = Math.round(n * 20);
-        else continue;
+        if (!Number.isFinite(n)) continue;
+        el.value = Math.max(+el.min, Math.min(+el.max, Math.round(n * 20)));
       } else if (entry.kind === "int") {
         const n = Number(val);
-        if (Number.isFinite(n)) el.value = n;
-        else continue;
+        if (!Number.isFinite(n)) continue;
+        const lo = +el.min; const hi = +el.max;
+        el.value = Math.round(Number.isFinite(lo) && Number.isFinite(hi) ? Math.max(lo, Math.min(hi, n)) : n);
       } else if (entry.kind === "str") {
-        el.value = String(val);
+        const s = String(val);
+        if (!Array.from(el.options || []).some(o => o.value === s)) continue;
+        el.value = s;
       }
       applied++;
     }
@@ -1076,9 +1148,9 @@
     if (e.target === els.exportImportBox) return;
     if (e.target.type === "range") {
       updateSliderProgress(e.target);
-      renderDebounced();
+      renderThrottled();
     } else if (e.target.type === "color") {
-      renderDebounced();
+      renderThrottled();
     } else {
       render();
     }

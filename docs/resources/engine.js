@@ -1,4 +1,3 @@
-/** biome-ignore-all lint/correctness/noUnusedVariables: wrong in context */
 // ── Time utilities ──
 
 const DAY_S = 86400;
@@ -83,9 +82,15 @@ function curveValueAt(now, ws, we, ds, de, minVal, maxVal, curveType) {
     dozeRev = true;
   }
 
+  // Edge case: zero-duration arc (start == end) — mod(0, DAY_S) = 0, so reversal is never detected above.
+  // Inherit the other arc's direction so hold states produce a consistent step.
+  // HA Python mirror: if ws == we: wake_rev = doze_rev / if ds == de: doze_rev = wake_rev
+  if (ws === we) wakeRev = dozeRev;
+  if (ds === de) dozeRev = wakeRev;
+
   // Segment detection via ordered range checks (wake has priority on overlap)
   let best;
-  if (ws !== we && inCircularRange(now, ws, we))      best = "wake";
+  if (ws !== we && inCircularRange(now, ws, we))       best = "wake";
   else if (we !== ds && inCircularRange(now, we, ds))  best = "hold_wake";
   else if (ds !== de && inCircularRange(now, ds, de))  best = "doze";
   else                                                 best = "hold_doze";

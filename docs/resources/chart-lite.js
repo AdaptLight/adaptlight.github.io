@@ -1,5 +1,4 @@
-/** biome-ignore-all lint/complexity/useOptionalChain: idk */
-// Lightweight Chart.js-compatible canvas renderer. Exposed as window.Chart.
+// Lightweight Chart.js-compatible canvas renderer. Exposed as window.Chart
 (() => {
 
   const registeredPlugins = [];
@@ -24,7 +23,7 @@
   }
 
   function formatTimeLabel(hhmm) {
-    if (localStorage.getItem("clockFormat") !== "12") {
+    if (_clockFormat !== "12") {
       const colon = hhmm.indexOf(":");
       if (colon > 0) return `${parseInt(hhmm.slice(0, colon), 10)}:${hhmm.slice(colon + 1)}`;
       return hhmm;
@@ -72,7 +71,7 @@
     return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
   }
 
-  // Intentional copy of getUiScale — each module reads the CSS var independently so they stay self-contained.
+  // Intentional copy of getUiScale — each module reads the CSS var independently so they stay self-contained
   function getUiScale() {
     const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
     const value = Number.parseFloat(raw);
@@ -93,6 +92,8 @@
     if (h < 320) return 10;
     return 5;
   }
+
+  let _clockFormat = localStorage.getItem("clockFormat");
 
   class LiteChart {
     constructor(ctx, config) {
@@ -130,6 +131,9 @@
       this._tooltipVisible = false;
       this.colorHexCache = [];
       this._uiScale = getUiScale();
+      this._cachedCanvasRect = null;
+      this._cachedParentRect = null;
+      this._hoverBoundsCache = null;
       this._hoverPoint = null;
       this._markerLocked = false;
       this._lockedIndex = null;
@@ -137,6 +141,7 @@
       this._holdStartX = 0;
       this._holdStartY = 0;
       this._markerFadeTimer = null;
+      this._tooltipFadeTimer = null;
       this._trailCanvas = this._createTrailCanvas();
       this._trailCtx = this._trailCanvas.getContext("2d");
       this._trailPoints = [];
@@ -151,14 +156,12 @@
       this._boundUp = this._handlePointerUp.bind(this);
       this._boundLeave = this._hideTooltip.bind(this);
       this._boundCancel = () => { this._markerLocked = false; clearTimeout(this._holdTimer); this._holdTimer = null; if (this._hoverTooltipEl) this._hoverTooltipEl.style.pointerEvents = ""; this._hideTooltip(); };
-      this._boundResize = this.resize.bind(this);
 
       this.canvas.addEventListener("pointermove", this._boundMove);
       this.canvas.addEventListener("pointerdown", this._boundDown);
       this.canvas.addEventListener("pointerup", this._boundUp);
       this.canvas.addEventListener("pointerleave", this._boundLeave);
       this.canvas.addEventListener("pointercancel", this._boundCancel);
-      window.addEventListener("resize", this._boundResize);
 
       this.resize();
     }
@@ -170,13 +173,16 @@
       }
     }
 
+    static setClockFormat(fmt) {
+      _clockFormat = fmt;
+    }
+
     destroy() {
       this.canvas.removeEventListener("pointermove", this._boundMove);
       this.canvas.removeEventListener("pointerdown", this._boundDown);
       this.canvas.removeEventListener("pointerup", this._boundUp);
       this.canvas.removeEventListener("pointerleave", this._boundLeave);
       this.canvas.removeEventListener("pointercancel", this._boundCancel);
-      window.removeEventListener("resize", this._boundResize);
       clearTimeout(this._holdTimer);
       if (this._trailRafId) { cancelAnimationFrame(this._trailRafId); this._trailRafId = null; }
       if (this._trailCanvas && this._trailCanvas.parentNode) {
@@ -192,6 +198,8 @@
 
     resize() {
       this._uiScale = getUiScale();
+      this._cachedCanvasRect = null;
+      this._cachedParentRect = null;
       const parent = this.canvas.parentElement;
       if (!parent) return;
 
@@ -249,6 +257,7 @@
       if (!layout) return;
 
       this.chartArea = layout.chartArea;
+      this._updateHoverBoundsCache();
       this.scales.x = this._createXScale(this._dataCount(), this.chartArea);
       this.scales.yBrightness = this._createYScale(this.chartArea);
 
@@ -353,7 +362,7 @@
       const uiScale = this._uiScale || getUiScale();
       const tickStepMinutes = getXAxisTickStepMinutes(chartArea.width, uiScale);
       const xGridBottomExtend = Math.round(13 * uiScale);
-      const yGridLeftExtend = Math.round(11 * uiScale);
+      const yGridLeftExtend = Math.round(7 * uiScale);
       const yStep = getBrightnessTickStep(chartArea.height, uiScale);
       const lw = Math.max(1, uiScale);
 
@@ -534,6 +543,30 @@
       ctx.restore();
     }
 
+    _getCanvasRect() {
+      if (!this._cachedCanvasRect) this._cachedCanvasRect = this.canvas.getBoundingClientRect();
+      return this._cachedCanvasRect;
+    }
+
+    _getParentRect() {
+      if (!this._cachedParentRect) {
+        const parent = this.canvas.parentElement;
+        if (parent) this._cachedParentRect = parent.getBoundingClientRect();
+      }
+      return this._cachedParentRect;
+    }
+
+    _updateHoverBoundsCache() {
+      if (!this.chartArea || !this.chartArea.width) { this._hoverBoundsCache = null; return; }
+      const s = this._uiScale || getUiScale();
+      this._hoverBoundsCache = {
+        left: this.chartArea.left - Math.round(25 * s),
+        right: this.chartArea.right + Math.round(14 * s),
+        top: this.chartArea.top - Math.round(30 * s),
+        bottom: this.chartArea.bottom + Math.round(25 * s),
+      };
+    }
+
     _drawHoverPoint() {
       if (!this._hoverMarkerEl) return;
       if (!this._hoverPoint) {
@@ -543,8 +576,8 @@
 
       const uiScale = this._uiScale || getUiScale();
       const { x, y, color } = this._hoverPoint;
-      const canvasRect = this.canvas.getBoundingClientRect();
-      const parentRect = (this.canvas.parentElement || this.canvas).getBoundingClientRect();
+      const canvasRect = this._getCanvasRect();
+      const parentRect = this._getParentRect() || this._getCanvasRect();
       const canvasOffsetX = canvasRect.left - parentRect.left;
       const canvasOffsetY = canvasRect.top - parentRect.top;
       const px = Math.round(canvasOffsetX + x);
@@ -591,6 +624,7 @@
       const el = document.createElement("div");
       el.className = "chart-tooltip";
       el.style.display = "none";
+      el.style.opacity = "0";
       el.style.transform = "translate(-9999px,-9999px)";
 
       const row1 = document.createElement("div");
@@ -653,6 +687,9 @@
       let left = markerX + offset;
       let top = markerY - offset;
 
+      clearTimeout(this._tooltipFadeTimer);
+      this._tooltipFadeTimer = null;
+      el.style.opacity = "1";
       el.style.display = "block";
       if (this._ttContentChanged || !this._ttCachedW) {
         const rect = el.getBoundingClientRect();
@@ -692,7 +729,8 @@
     _resizeTrailCanvas() {
       const c = this._trailCanvas;
       if (!c || !c.parentElement) return;
-      const r = c.parentElement.getBoundingClientRect();
+      const r = this._getParentRect();
+      if (!r) return;
       const dpr = this._dpr;
       const w = Math.max(1, Math.floor(r.width));
       const h = Math.max(1, Math.floor(r.height));
@@ -965,8 +1003,9 @@
         return;
       }
 
-      const canvasRect = this.canvas.getBoundingClientRect();
-      const parentRect = c.parentElement.getBoundingClientRect();
+      const canvasRect = this._getCanvasRect();
+      const parentRect = this._getParentRect();
+      if (!parentRect) return;
       const offX = canvasRect.left - parentRect.left;
       const offY = canvasRect.top - parentRect.top;
 
@@ -1025,7 +1064,7 @@
       const x = chartArea.left + frac * (width / denom);
       const y = !Number.isFinite(v1) ? chartArea.bottom
         : !Number.isFinite(v2) ? chartArea.bottom - (clamp(v1, 0, 100) / 100) * height
-        : chartArea.bottom - ((clamp(v1, 0, 100) * (1 - t) + clamp(v2, 0, 100) * t) / 100) * height;
+          : chartArea.bottom - ((clamp(v1, 0, 100) * (1 - t) + clamp(v2, 0, 100) * t) / 100) * height;
       const roundedIndex = clamp(Math.round(frac), 0, count - 1);
       const label = formatTimeLabel(labels[roundedIndex] || minuteLabel(roundedIndex));
       const displayValue = clamp((chartArea.bottom - y) / height * 100, 0, 100);
@@ -1052,6 +1091,9 @@
       this._hoverPoint = pt;
       this._updateTooltipContent(pt.label, pt.displayValue, pt.color);
       if (this._hoverTooltipEl) {
+        clearTimeout(this._tooltipFadeTimer);
+        this._tooltipFadeTimer = null;
+        this._hoverTooltipEl.style.opacity = "1";
         this._hoverTooltipEl.style.display = "block";
         this._hoverTooltipEl.style.pointerEvents = "auto";
         this._hoverTooltipEl.style.userSelect = "text";
@@ -1171,7 +1213,12 @@
       this._pendingPointerEvent = null;
       this._lastGlowColor = null;
       if (this._hoverTooltipEl) {
-        this._hoverTooltipEl.style.display = "none";
+        this._hoverTooltipEl.style.opacity = "0";
+        clearTimeout(this._tooltipFadeTimer);
+        this._tooltipFadeTimer = setTimeout(() => {
+          if (this._hoverTooltipEl) this._hoverTooltipEl.style.display = "none";
+          this._tooltipFadeTimer = null;
+        }, 200);
       }
       this._trailAbandoned = true;
       this._trailLeftTime = performance.now();
@@ -1185,18 +1232,9 @@
       }
     }
 
-    _getHoverBounds() {
-      const s = this._uiScale || getUiScale();
-      return {
-        left: this.chartArea.left - Math.round(25 * s),
-        right: this.chartArea.right + Math.round(14 * s),
-        top: this.chartArea.top - Math.round(30 * s),
-        bottom: this.chartArea.bottom + Math.round(25 * s),
-      };
-    }
-
     _isWithinHoverBounds(x, y) {
-      const b = this._getHoverBounds();
+      const b = this._hoverBoundsCache;
+      if (!b) return false;
       return x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
     }
 
@@ -1309,5 +1347,6 @@
   }
 
   LiteChart.register = LiteChart.register.bind(LiteChart);
+  LiteChart.setClockFormat = LiteChart.setClockFormat.bind(LiteChart);
   window.Chart = LiteChart;
 })();
